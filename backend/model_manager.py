@@ -479,7 +479,6 @@ class ModelManager:
         kwargs: dict = {
             "torch_dtype": torch.float16,
             "use_safetensors": True,
-            "variant": "fp16",
         }
         if is_local_dir:
             logger.info("Loading SDXL from local directory override: %s", model_path)

@@ -37,39 +37,19 @@ ENV TRANSFORMERS_CACHE=/app/hf_cache
 ENV DIFFUSERS_CACHE=/app/hf_cache
 
 # 1. Illustrious-XL (primary SDXL diffusion model) — precached
-RUN python -c "\
-from diffusers import StableDiffusionXLImg2ImgPipeline; \
-import torch; \
-pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained( \
-    'OnomaAIResearch/Illustrious-xl-early-release-v0', \
-    torch_dtype=torch.float16, \
-    use_safetensors=True, \
-    variant='fp16', \
-); \
-print('Illustrious-XL downloaded successfully') \
-"
+RUN huggingface-cli download OnomaAIResearch/Illustrious-xl-early-release-v0 \
+    --cache-dir /app/hf_cache \
+    && echo "Illustrious-XL downloaded successfully"
 
 # 2. ControlNet Tile SDXL
-RUN python -c "\
-from diffusers import ControlNetModel; \
-import torch; \
-cn = ControlNetModel.from_pretrained( \
-    'xinsir/controlnet-tile-sdxl-1.0', \
-    torch_dtype=torch.float16, \
-); \
-print('ControlNet Tile SDXL downloaded successfully') \
-"
+RUN huggingface-cli download xinsir/controlnet-tile-sdxl-1.0 \
+    --cache-dir /app/hf_cache \
+    && echo "ControlNet Tile SDXL downloaded successfully"
 
 # 3. SDXL VAE fp16-fix
-RUN python -c "\
-from diffusers import AutoencoderKL; \
-import torch; \
-vae = AutoencoderKL.from_pretrained( \
-    'madebyollin/sdxl-vae-fp16-fix', \
-    torch_dtype=torch.float16, \
-); \
-print('SDXL VAE fp16-fix downloaded successfully') \
-"
+RUN huggingface-cli download madebyollin/sdxl-vae-fp16-fix \
+    --cache-dir /app/hf_cache \
+    && echo "SDXL VAE fp16-fix downloaded successfully"
 
 # 4. Qwen2.5-VL-7B-Instruct (captioning + image editing)
 # NOTE: Qwen2.5-VL-7B-Instruct (~15 GB) is NOT baked into this image.
@@ -81,21 +61,9 @@ print('SDXL VAE fp16-fix downloaded successfully') \
 # to ~15-20 GB.
 
 # 5. IP-Adapter SDXL weights + CLIP ViT-H image encoder (precached for Phase 4)
-RUN python -c "\
-from huggingface_hub import hf_hub_download; \
-path = hf_hub_download( \
-    repo_id='h94/IP-Adapter', \
-    filename='ip-adapter_sdxl_vit-h.safetensors', \
-    subfolder='sdxl_models', \
-); \
-print(f'IP-Adapter SDXL weights downloaded to: {path}'); \
-from transformers import CLIPVisionModelWithProjection; \
-encoder = CLIPVisionModelWithProjection.from_pretrained( \
-    'h94/IP-Adapter', \
-    subfolder='models/image_encoder', \
-); \
-print('IP-Adapter CLIP image encoder downloaded successfully') \
-"
+RUN huggingface-cli download h94/IP-Adapter \
+    --cache-dir /app/hf_cache \
+    && echo "IP-Adapter downloaded successfully"
 
 # ---------------------------------------------------------------------------
 # Copy backend source code
