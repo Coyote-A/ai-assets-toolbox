@@ -1,13 +1,15 @@
 """
-Upscale action handler.
+Region-based upscale action handler.
 
-Processes image tiles through a diffusion img2img pipeline (SDXL or Flux)
-with optional LoRA and ControlNet conditioning.
+Processes image regions through a diffusion img2img pipeline (SDXL or Flux)
+with optional LoRA and ControlNet conditioning. Each region is extracted from
+the source image with padding applied, processed individually with its own
+prompt, and returned as an upscaled region.
 
 Request schema
 --------------
 {
-    "action": "upscale",
+    "action": "upscale_regions",
     "model_config": {
         "base_model": "z-image-xl",   # short model name
         "model_type": "sdxl",         # "sdxl" | "flux"
@@ -28,11 +30,15 @@ Request schema
     },
     "global_prompt": "masterpiece, best quality",
     "negative_prompt": "blurry, low quality",
-    "tiles": [
+    "source_image_b64": "<base64>",  # Original full image
+    "target_resolution": {"width": 8192, "height": 8192},
+    "regions": [
         {
-            "tile_id": "0_0",
-            "image_b64": "<base64>",
-            "prompt_override": null
+            "region_id": "region_1",
+            "x": 100, "y": 100, "w": 512, "h": 512,
+            "padding": 64,
+            "prompt": "detailed face",
+            "negative_prompt": "blurry face"
         }
     ]
 }
@@ -40,8 +46,14 @@ Request schema
 Response schema
 ---------------
 {
-    "tiles": [
-        {"tile_id": "0_0", "image_b64": "<base64>", "seed_used": 42},
+    "regions": [
+        {
+            "region_id": "region_1",
+            "image_b64": "<base64>",
+            "seed_used": 42,
+            "original_bbox": {"x": 100, "y": 100, "w": 512, "h": 512},
+            "padded_bbox": {"x": 36, "y": 36, "w": 640, "h": 640}
+        },
         ...
     ]
 }
@@ -51,15 +63,15 @@ import logging
 import random
 from typing import Any, Optional
 
-from model_manager import ModelManager, CHECKPOINT_MODELS, CONTROLNET_MODELS, _is_flux_model
+from model_manager import ModelManager, _is_flux_model
 from utils.image_utils import b64_to_pil, pil_to_b64
 
 logger = logging.getLogger(__name__)
 
 
-def handle_upscale(job_input: dict[str, Any]) -> dict[str, Any]:
+def handle_upscale_regions(job_input: dict[str, Any]) -> dict[str, Any]:
     """
-    Handle the ``upscale`` action.
+    Handle the ``upscale_regions`` action.
 
     Parameters
     ----------
@@ -69,16 +81,22 @@ def handle_upscale(job_input: dict[str, Any]) -> dict[str, Any]:
     Returns
     -------
     dict
-        ``{"tiles": [{"tile_id": ..., "image_b64": ..., "seed_used": ...}, ...]}``
+        ``{"regions": [{"region_id": ..., "image_b64": ..., "seed_used": ..., 
+        "original_bbox": {...}, "padded_bbox": {...}}, ...]}``
     """
     model_config: dict[str, Any] = job_input.get("model_config", {})
     gen_params: dict[str, Any] = job_input.get("generation_params", {})
     global_prompt: str = job_input.get("global_prompt", "")
     negative_prompt: str = job_input.get("negative_prompt", "")
-    tiles: list[dict[str, Any]] = job_input.get("tiles", [])
+    source_image_b64: str = job_input.get("source_image_b64", "")
+    target_resolution: dict[str, int] = job_input.get("target_resolution", {})
+    regions: list[dict[str, Any]] = job_input.get("regions", [])
 
-    if not tiles:
-        raise ValueError("No 'tiles' provided in upscale request")
+    if not source_image_b64:
+        raise ValueError("No 'source_image_b64' provided in upscale_regions request")
+
+    if not regions:
+        raise ValueError("No 'regions' provided in upscale_regions request")
 
     # ------------------------------------------------------------------
     # Parse model config
@@ -99,12 +117,22 @@ def handle_upscale(job_input: dict[str, Any]) -> dict[str, Any]:
     base_seed: Optional[int] = gen_params.get("seed")
 
     logger.info(
-        "Upscale action: model='%s' tiles=%d steps=%d strength=%.2f controlnet=%s",
+        "Upscale regions action: model='%s' regions=%d steps=%d strength=%.2f controlnet=%s",
         base_model,
-        len(tiles),
+        len(regions),
         steps,
         strength,
         controlnet_enabled,
+    )
+
+    # ------------------------------------------------------------------
+    # Load source image
+    # ------------------------------------------------------------------
+    source_image = b64_to_pil(source_image_b64)
+    logger.info(
+        "Source image loaded: %dx%d",
+        source_image.width,
+        source_image.height,
     )
 
     # ------------------------------------------------------------------
@@ -129,66 +157,114 @@ def handle_upscale(job_input: dict[str, Any]) -> dict[str, Any]:
     pipe = manager._diffusion_pipe  # access the raw pipeline
 
     # ------------------------------------------------------------------
-    # Process tiles
+    # Process regions
     # ------------------------------------------------------------------
     results: list[dict[str, Any]] = []
 
-    for tile_entry in tiles:
-        tile_id: str = tile_entry.get("tile_id", "unknown")
-        image_b64: str = tile_entry.get("image_b64", "")
-        prompt_override: Optional[str] = tile_entry.get("prompt_override")
+    for region_entry in regions:
+        region_id: str = region_entry.get("region_id", "unknown")
+        x: int = int(region_entry.get("x", 0))
+        y: int = int(region_entry.get("y", 0))
+        w: int = int(region_entry.get("w", 0))
+        h: int = int(region_entry.get("h", 0))
+        padding: int = int(region_entry.get("padding", 0))
+        region_prompt: str = region_entry.get("prompt", "")
+        region_negative_prompt: str = region_entry.get("negative_prompt", "")
 
-        if not image_b64:
-            logger.warning("Tile '%s' has no image data — skipping", tile_id)
-            results.append({"tile_id": tile_id, "image_b64": "", "seed_used": None})
-            continue
+        # Calculate padded bounding box
+        padded_x = max(0, x - padding)
+        padded_y = max(0, y - padding)
+        padded_w = w + 2 * padding
+        padded_h = h + 2 * padding
 
-        # Compose prompt: global + tile-specific override
-        if prompt_override:
-            prompt = f"{global_prompt}, {prompt_override}" if global_prompt else prompt_override
+        # Clamp to image bounds
+        padded_x = min(padded_x, source_image.width - 1)
+        padded_y = min(padded_y, source_image.height - 1)
+        padded_w = min(padded_w, source_image.width - padded_x)
+        padded_h = min(padded_h, source_image.height - padded_y)
+
+        padded_bbox = {
+            "x": padded_x,
+            "y": padded_y,
+            "w": padded_w,
+            "h": padded_h,
+        }
+
+        original_bbox = {
+            "x": x,
+            "y": y,
+            "w": w,
+            "h": h,
+        }
+
+        # Extract region from source image
+        region_image = source_image.crop((padded_x, padded_y, padded_x + padded_w, padded_y + padded_h))
+        logger.info(
+            "Extracted region '%s': original=(%d,%d,%d,%d) padded=(%d,%d,%d,%d) -> %dx%d",
+            region_id,
+            x, y, w, h,
+            padded_x, padded_y, padded_w, padded_h,
+            region_image.width, region_image.height,
+        )
+
+        # Compose prompt: global + region-specific
+        if region_prompt:
+            prompt = f"{global_prompt}, {region_prompt}" if global_prompt else region_prompt
         else:
             prompt = global_prompt
 
-        # Determine seed for this tile
-        tile_seed: int = base_seed if base_seed is not None else random.randint(0, 2**32 - 1)
+        # Compose negative prompt: global + region-specific
+        if region_negative_prompt:
+            neg_prompt = f"{negative_prompt}, {region_negative_prompt}" if negative_prompt else region_negative_prompt
+        else:
+            neg_prompt = negative_prompt
 
-        pil_image = b64_to_pil(image_b64)
+        # Determine seed for this region
+        region_seed: int = base_seed if base_seed is not None else random.randint(0, 2**32 - 1)
+
         logger.info(
-            "Processing tile '%s' (%dx%d) seed=%d",
-            tile_id,
-            pil_image.width,
-            pil_image.height,
-            tile_seed,
+            "Processing region '%s' (%dx%d) seed=%d prompt='%s'",
+            region_id,
+            region_image.width,
+            region_image.height,
+            region_seed,
+            prompt[:50] + "..." if len(prompt) > 50 else prompt,
         )
 
         if is_flux:
             output_image = _run_flux(
                 pipe=pipe,
-                image=pil_image,
+                image=region_image,
                 prompt=prompt,
                 strength=strength,
                 steps=steps,
-                seed=tile_seed,
+                seed=region_seed,
             )
         else:
             output_image = _run_sdxl(
                 pipe=pipe,
-                image=pil_image,
+                image=region_image,
                 prompt=prompt,
-                negative_prompt=negative_prompt,
+                negative_prompt=neg_prompt,
                 strength=strength,
                 steps=steps,
                 cfg_scale=cfg_scale,
-                seed=tile_seed,
+                seed=region_seed,
                 controlnet_enabled=controlnet_enabled,
                 controlnet_conditioning_scale=controlnet_conditioning_scale,
             )
 
         result_b64 = pil_to_b64(output_image)
-        results.append({"tile_id": tile_id, "image_b64": result_b64, "seed_used": tile_seed})
-        logger.info("Tile '%s' processed successfully", tile_id)
+        results.append({
+            "region_id": region_id,
+            "image_b64": result_b64,
+            "seed_used": region_seed,
+            "original_bbox": original_bbox,
+            "padded_bbox": padded_bbox,
+        })
+        logger.info("Region '%s' processed successfully", region_id)
 
-    return {"tiles": results}
+    return {"regions": results}
 
 
 # ---------------------------------------------------------------------------

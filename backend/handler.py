@@ -11,6 +11,7 @@ import runpod
 
 from actions.caption import handle_caption
 from actions.upscale import handle_upscale
+from actions.upscale_regions import handle_upscale_regions
 from actions.models import handle_list_models, handle_upload_model, handle_delete_model
 from model_manager import ModelManager
 
@@ -75,6 +76,8 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
             result = handle_caption(job_input)
         elif action == "upscale":
             result = handle_upscale(job_input)
+        elif action == "upscale_regions":
+            result = handle_upscale_regions(job_input)
         elif action == "list_models":
             result = handle_list_models(job_input)
         elif action == "upload_model":

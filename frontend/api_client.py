@@ -136,7 +136,7 @@ class RunPodClient:
 
         Args:
             tiles_b64: list of {"tile_id": str, "image_b64": str}
-            system_prompt: optional override for the captioning system prompt
+            system_prompt: optional override for the.captioning system prompt
 
         Returns:
             list of {"tile_id": str, "caption": str}
@@ -151,13 +151,49 @@ class RunPodClient:
         )
         return output.get("captions", [])
 
+    def caption_regions(
+        self,
+        regions_b64: List[Dict[str, str]],
+        system_prompt: Optional[str] = None,
+    ) -> List[Dict[str, str]]:
+        """
+        Send region images for captioning via Qwen2.5-VL.
+
+        Args:
+            regions_b64: list of {"region_id": str, "image_b64": str}
+            system_prompt: optional override for the captioning system prompt
+
+        Returns:
+            list of {"region_id": str, "caption": str}
+        """
+        caption_params: Dict[str, Any] = {"max_tokens": 200}
+        if system_prompt:
+            caption_params["system_prompt"] = system_prompt
+
+        # Convert region_id to tile_id for the API (backend treats them the same)
+        tiles_payload = [
+            {"tile_id": r["region_id"], "image_b64": r["image_b64"]}
+            for r in regions_b64
+        ]
+
+        output = self.run_sync(
+            "caption",
+            {"tiles": tiles_payload, "caption_params": caption_params},
+        )
+        # Convert tile_id back to region_id in the response
+        captions = output.get("captions", [])
+        return [
+            {"region_id": c["tile_id"], "caption": c["caption"]}
+            for c in captions
+        ]
+
     def upscale_tiles(self, tiles_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Send tiles for upscaling through the diffusion img2img pipeline.
 
         Each element of tiles_data should contain:
             tile_id, image_b64, prompt_override (optional),
-            model, model_type, lora_name (optional), lora_weight,
+            model, model_type, loras (list of {name, weight}),
             controlnet_enabled, conditioning_scale,
             strength, steps, cfg_scale, seed,
             global_prompt, negative_prompt
@@ -171,9 +207,8 @@ class RunPodClient:
         # Build the request from the first tile's shared settings
         first = tiles_data[0]
 
-        loras = []
-        if first.get("lora_name"):
-            loras = [{"name": first["lora_name"], "weight": first.get("lora_weight", 0.7)}]
+        # Accept loras as a list of {name, weight} dicts (new multi-LoRA format)
+        loras: List[Dict[str, Any]] = first.get("loras", [])
 
         model_config: Dict[str, Any] = {
             "base_model": first.get("model", "z-image-xl"),
@@ -213,6 +248,81 @@ class RunPodClient:
             },
         )
         return output.get("tiles", [])
+
+    def upscale_regions(
+        self,
+        regions_data: List[Dict[str, Any]],
+        original_image_b64: str,
+        model: str,
+        model_type: str,
+        loras: Optional[List[Dict[str, Any]]],
+        global_prompt: str,
+        negative_prompt: str,
+        strength: float,
+        steps: int,
+        cfg_scale: float,
+        seed: int,
+        controlnet_enabled: bool,
+        conditioning_scale: float,
+    ) -> List[Dict[str, Any]]:
+        """
+        Send regions for upscaling through the diffusion img2img pipeline.
+
+        Each element of regions_data should contain:
+            x, y, w, h, padding, prompt, negative_prompt
+
+        loras: list of {"name": str, "weight": float} dicts (multi-LoRA support).
+
+        Returns:
+            list of {"region_id": str, "image_b64": str, "seed_used": int}
+        """
+        if not regions_data:
+            return []
+
+        model_config: Dict[str, Any] = {
+            "base_model": model,
+            "model_type": model_type,
+            "loras": loras if loras else [],
+            "controlnet": {
+                "enabled": controlnet_enabled,
+                "model": "sdxl-tile",
+                "conditioning_scale": conditioning_scale,
+            },
+        }
+
+        generation_params: Dict[str, Any] = {
+            "steps": steps,
+            "cfg_scale": cfg_scale,
+            "denoising_strength": strength,
+            "seed": seed,
+        }
+
+        regions_payload = [
+            {
+                "region_id": f"region_{i}",
+                "x": r.get("x", 0),
+                "y": r.get("y", 0),
+                "w": r.get("w", 0),
+                "h": r.get("h", 0),
+                "padding": r.get("padding", 64),
+                "prompt": r.get("prompt", ""),
+                "negative_prompt": r.get("negative_prompt", ""),
+            }
+            for i, r in enumerate(regions_data)
+        ]
+
+        output = self.run_sync(
+            "upscale_regions",
+            {
+                "model_config": model_config,
+                "generation_params": generation_params,
+                "global_prompt": global_prompt,
+                "negative_prompt": negative_prompt,
+                "regions": regions_payload,
+                "source_image_b64": original_image_b64,
+            },
+        )
+        return output.get("regions", [])
 
     def list_models(self, model_type: str, base_model_filter: Optional[str] = None) -> List[Dict[str, Any]]:
         """

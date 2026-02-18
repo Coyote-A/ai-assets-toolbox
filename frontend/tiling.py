@@ -41,6 +41,42 @@ class TileInfo:
         return self.y + self.h
 
 
+@dataclass
+class RegionInfo:
+    """Describes a user-selected region for targeted upscaling."""
+    x: int          # left edge in the full image (pixels)
+    y: int          # top edge in the full image (pixels)
+    w: int          # region width (pixels)
+    h: int          # region height (pixels)
+    padding: int    # padding around the region in pixels
+    prompt: str     # prompt for this region
+    negative_prompt: str  # negative prompt for this region
+
+    @property
+    def region_id(self) -> str:
+        return f"region_{self.x}_{self.y}_{self.w}_{self.h}"
+
+    @property
+    def x2(self) -> int:
+        return self.x + self.w
+
+    @property
+    def y2(self) -> int:
+        return self.y + self.h
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for API payload."""
+        return {
+            "x": self.x,
+            "y": self.y,
+            "w": self.w,
+            "h": self.h,
+            "padding": self.padding,
+            "prompt": self.prompt,
+            "negative_prompt": self.negative_prompt,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Grid calculation
 # ---------------------------------------------------------------------------
@@ -124,6 +160,42 @@ def extract_all_tiles(
     """
     tiles = calculate_tiles(image.size, tile_size=tile_size, overlap=overlap)
     return [(t, extract_tile(image, t)) for t in tiles]
+
+
+def extract_region_image(
+    image: Image.Image,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    padding: int = 0,
+) -> Image.Image:
+    """
+    Crop a region from the image with optional padding and bounds clamping.
+
+    Args:
+        image:   source PIL Image.
+        x, y:   top-left corner of the region.
+        w, h:   width/height of the region.
+        padding: extra pixels around the region (applied on all sides).
+
+    Returns:
+        Cropped PIL Image.
+    """
+    img_w, img_h = image.size
+    pad = max(0, int(padding))
+
+    left = max(0, int(x) - pad)
+    top = max(0, int(y) - pad)
+    right = min(img_w, int(x) + int(w) + pad)
+    bottom = min(img_h, int(y) + int(h) + pad)
+
+    if right < left:
+        right = left
+    if bottom < top:
+        bottom = top
+
+    return image.crop((left, top, right, bottom))
 
 
 # ---------------------------------------------------------------------------
@@ -285,3 +357,64 @@ def upscale_image(
         Upscaled PIL Image.
     """
     return image.resize((target_width, target_height), Image.BICUBIC)
+
+
+# ---------------------------------------------------------------------------
+# Region overlay visualisation
+# ---------------------------------------------------------------------------
+
+def draw_region_overlay(
+    image: Image.Image,
+    regions: List[dict],
+    selected_index: Optional[int] = None,
+) -> Image.Image:
+    """
+    Draw region overlays on a copy of the image.
+
+    Args:
+    
+    image:           source PIL Image.
+    regions:         list of region dicts with x, y, w, h, padding.
+    selected_index:  index of the currently selected region to highlight.
+
+    Returns:
+        New PIL Image with the regions drawn on top.
+    """
+    overlay = image.convert("RGBA").copy()
+    draw = ImageDraw.Draw(overlay, "RGBA")
+
+    for idx, region in enumerate(regions):
+        x = region.get("x", 0)
+        y = region.get("y", 0)
+        w = region.get("w", 0)
+        h = region.get("h", 0)
+        padding = region.get("padding", 0)
+
+        # Draw padding region (lighter)
+        if padding > 0:
+            pad_rect = [
+                x - padding,
+                y - padding,
+                x + w + padding,
+                y + h + padding,
+            ]
+            draw.rectangle(pad_rect, fill=(255, 200, 0, 30), outline=(255, 200, 0, 150), width=2)
+
+        # Draw main region rectangle
+        rect = [x, y, x + w, y + h]
+        if idx == selected_index:
+            fill_color = (0, 100, 255, 60)
+            outline_color = (0, 100, 255, 220)
+            outline_width = 3
+        else:
+            fill_color = (255, 100, 0, 50)
+            outline_color = (255, 100, 0, 200)
+            outline_width = 2
+
+        draw.rectangle(rect, fill=fill_color, outline=outline_color, width=outline_width)
+
+        # Draw region index label in the top-left corner
+        label = f"#{idx}"
+        draw.text((x + 5, y + 5), label, fill=(255, 255, 255, 220))
+
+    return overlay.convert("RGB")
