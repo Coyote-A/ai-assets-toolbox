@@ -1,23 +1,20 @@
 # ============================================================
 # AI Assets Toolbox — RunPod Serverless Worker
 # ============================================================
-# Base image: RunPod PyTorch 2.2 with CUDA 12.1 on Ubuntu 22.04
+# Base image: NVIDIA CUDA 12.1.1 devel on Ubuntu 22.04
 # ============================================================
-FROM runpod/pytorch:2.2.0-py3.11-cuda12.1.1-devel-ubuntu22.04
+FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
 
 # Prevent interactive prompts during apt installs
 ENV DEBIAN_FRONTEND=noninteractive
-
-# ---------------------------------------------------------------------------
-# System dependencies
-# ---------------------------------------------------------------------------
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        git \
-        wget \
-        curl \
-        libgl1 \
-        libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y \
+    python3.11 python3.11-venv python3.11-dev python3-pip \
+    git wget curl \
+    libgl1 libglib2.0-0 \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
+    && pip install --upgrade pip \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
 # Python dependencies
@@ -48,6 +45,7 @@ ENV PYTHONPATH=/app
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
+RUN sed -i 's/\r$//' /app/start.sh
 RUN chmod +x /app/start.sh
 
 CMD ["/app/start.sh"]
