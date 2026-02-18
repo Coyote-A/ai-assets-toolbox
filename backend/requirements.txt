@@ -1,4 +1,5 @@
 runpod
+huggingface_hub[cli]
 torch>=2.2.0
 diffusers>=0.31.0
 transformers>=4.45.0

@@ -36,6 +36,9 @@ ENV HF_HOME=/app/hf_cache
 ENV TRANSFORMERS_CACHE=/app/hf_cache
 ENV DIFFUSERS_CACHE=/app/hf_cache
 
+# Ensure huggingface-cli is available for model downloads
+RUN pip install --no-cache-dir "huggingface_hub[cli]"
+
 # 1. Illustrious-XL (primary SDXL diffusion model) — precached
 RUN huggingface-cli download OnomaAIResearch/Illustrious-XL-v2.0 \
     --cache-dir /app/hf_cache \
