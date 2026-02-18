@@ -94,6 +94,14 @@ def handle_upscale_regions(job_input: dict[str, Any]) -> dict[str, Any]:
     target_resolution: dict[str, int] = job_input.get("target_resolution", {})
     regions: list[dict[str, Any]] = job_input.get("regions", [])
 
+    # Optional generation resolution override (mirrors upscale.py behaviour).
+    target_width: Optional[int] = job_input.get("target_width")
+    target_height: Optional[int] = job_input.get("target_height")
+    if target_width is not None:
+        target_width = int(target_width)
+    if target_height is not None:
+        target_height = int(target_height)
+
     # IP-Adapter params (all optional)
     ip_adapter_enabled: bool = bool(job_input.get("ip_adapter_enabled", False))
     ip_adapter_image_b64: Optional[str] = job_input.get("ip_adapter_image")
@@ -124,13 +132,14 @@ def handle_upscale_regions(job_input: dict[str, Any]) -> dict[str, Any]:
     base_seed: Optional[int] = gen_params.get("seed")
 
     logger.info(
-        "Upscale regions action: model='%s' regions=%d steps=%d strength=%.2f controlnet=%s ip_adapter=%s",
+        "Upscale regions action: model='%s' regions=%d steps=%d strength=%.2f controlnet=%s ip_adapter=%s target_size=%s",
         base_model,
         len(regions),
         steps,
         strength,
         controlnet_enabled,
         ip_adapter_enabled,
+        f"{target_width}x{target_height}" if target_width and target_height else "from_image",
     )
 
     # ------------------------------------------------------------------
@@ -267,6 +276,8 @@ def handle_upscale_regions(job_input: dict[str, Any]) -> dict[str, Any]:
             controlnet_enabled=controlnet_enabled,
             controlnet_conditioning_scale=controlnet_conditioning_scale,
             ip_adapter_image=ip_adapter_pil,
+            target_width=target_width,
+            target_height=target_height,
         )
 
         result_b64 = pil_to_b64(output_image)
@@ -298,7 +309,19 @@ def _run_sdxl(
     controlnet_enabled: bool,
     controlnet_conditioning_scale: float,
     ip_adapter_image: Optional[Any] = None,
+    target_width: Optional[int] = None,
+    target_height: Optional[int] = None,
 ) -> Any:
+    """
+    Run the SDXL img2img pipeline for a region.
+
+    Parameters
+    ----------
+    target_width, target_height:
+        Optional explicit output dimensions for the pipeline.  When provided,
+        the pipeline generates at this resolution rather than deriving it from
+        the input image dimensions.
+    """
     import torch
 
     generator = torch.Generator(device="cuda").manual_seed(seed)
@@ -311,6 +334,13 @@ def _run_sdxl(
         "guidance_scale": cfg_scale,
         "generator": generator,
     }
+
+    # Pass explicit width/height to the pipeline when provided.
+    if target_width is not None:
+        kwargs["width"] = target_width
+    if target_height is not None:
+        kwargs["height"] = target_height
+
     if controlnet_enabled:
         kwargs["control_image"] = image
         kwargs["controlnet_conditioning_scale"] = controlnet_conditioning_scale

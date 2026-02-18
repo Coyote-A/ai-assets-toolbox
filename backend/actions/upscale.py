@@ -79,6 +79,17 @@ def handle_upscale(job_input: dict[str, Any]) -> dict[str, Any]:
     negative_prompt: str = job_input.get("negative_prompt", "")
     tiles: list[dict[str, Any]] = job_input.get("tiles", [])
 
+    # Optional generation resolution override.
+    # When set, the pipeline generates at this size regardless of the input tile size.
+    # The frontend is responsible for upscaling the input tile to this size before
+    # sending it, and for downscaling the result back to the grid tile size after.
+    target_width: Optional[int] = job_input.get("target_width")
+    target_height: Optional[int] = job_input.get("target_height")
+    if target_width is not None:
+        target_width = int(target_width)
+    if target_height is not None:
+        target_height = int(target_height)
+
     # IP-Adapter params (all optional)
     ip_adapter_enabled: bool = bool(job_input.get("ip_adapter_enabled", False))
     ip_adapter_image_b64: Optional[str] = job_input.get("ip_adapter_image")
@@ -106,13 +117,14 @@ def handle_upscale(job_input: dict[str, Any]) -> dict[str, Any]:
     base_seed: Optional[int] = gen_params.get("seed")
 
     logger.info(
-        "Upscale action: model='%s' tiles=%d steps=%d strength=%.2f controlnet=%s ip_adapter=%s",
+        "Upscale action: model='%s' tiles=%d steps=%d strength=%.2f controlnet=%s ip_adapter=%s target_size=%s",
         base_model,
         len(tiles),
         steps,
         strength,
         controlnet_enabled,
         ip_adapter_enabled,
+        f"{target_width}x{target_height}" if target_width and target_height else "from_image",
     )
 
     # ------------------------------------------------------------------
@@ -197,6 +209,8 @@ def handle_upscale(job_input: dict[str, Any]) -> dict[str, Any]:
             controlnet_enabled=controlnet_enabled,
             controlnet_conditioning_scale=controlnet_conditioning_scale,
             ip_adapter_image=ip_adapter_pil,
+            target_width=target_width,
+            target_height=target_height,
         )
 
         result_b64 = pil_to_b64(output_image)
@@ -222,7 +236,22 @@ def _run_sdxl(
     controlnet_enabled: bool,
     controlnet_conditioning_scale: float,
     ip_adapter_image: Optional[Any] = None,
+    target_width: Optional[int] = None,
+    target_height: Optional[int] = None,
 ) -> Any:
+    """
+    Run the SDXL img2img pipeline.
+
+    Parameters
+    ----------
+    target_width, target_height:
+        Optional explicit output dimensions for the pipeline.  When provided
+        (and different from the input image size), the pipeline is instructed
+        to generate at this resolution.  The frontend is responsible for
+        upscaling the input tile to this size before calling this function and
+        for downscaling the result back to the grid tile size afterwards.
+        When ``None``, the pipeline derives the output size from the input image.
+    """
     import torch
 
     generator = torch.Generator(device="cuda").manual_seed(seed)
@@ -235,6 +264,16 @@ def _run_sdxl(
         "guidance_scale": cfg_scale,
         "generator": generator,
     }
+
+    # Pass explicit width/height to the pipeline when provided.
+    # This ensures the diffusion model generates at the requested resolution
+    # (e.g. 1536×1536 for Illustrious-XL native resolution) rather than
+    # inferring it from the input image dimensions.
+    if target_width is not None:
+        kwargs["width"] = target_width
+    if target_height is not None:
+        kwargs["height"] = target_height
+
     if controlnet_enabled:
         kwargs["control_image"] = image
         kwargs["controlnet_conditioning_scale"] = controlnet_conditioning_scale

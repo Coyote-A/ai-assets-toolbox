@@ -230,6 +230,12 @@ class RunPodClient:
             "seed": first.get("seed", -1),
         }
 
+        # Optional generation resolution override (target_width/target_height).
+        # When provided, the backend will use these dimensions for the pipeline
+        # width/height instead of deriving them from the input tile size.
+        target_width: Optional[int] = first.get("target_width")
+        target_height: Optional[int] = first.get("target_height")
+
         tiles_payload = [
             {
                 "tile_id": t["tile_id"],
@@ -246,6 +252,12 @@ class RunPodClient:
             "negative_prompt": first.get("negative_prompt", ""),
             "tiles": tiles_payload,
         }
+
+        # Include target resolution when explicitly set
+        if target_width is not None:
+            request_body["target_width"] = int(target_width)
+        if target_height is not None:
+            request_body["target_height"] = int(target_height)
 
         # Include IP-Adapter params when enabled
         if first.get("ip_adapter_enabled"):

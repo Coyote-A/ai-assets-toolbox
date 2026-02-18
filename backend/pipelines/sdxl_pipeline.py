@@ -130,6 +130,8 @@ class SDXLPipeline:
         controlnet_image: Optional[Image.Image] = None,
         controlnet_conditioning_scale: float = 0.6,
         ip_adapter_image: Optional[Image.Image] = None,
+        target_width: Optional[int] = None,
+        target_height: Optional[int] = None,
     ) -> Image.Image:
         """
         Run SDXL img2img generation.
@@ -159,6 +161,11 @@ class SDXLPipeline:
             Optional PIL Image used as the IP-Adapter style reference.  When
             provided the pipeline must have IP-Adapter loaded via
             ``pipe.load_ip_adapter()``.  Ignored when ``None``.
+        target_width, target_height:
+            Optional explicit output dimensions.  When provided, the pipeline
+            generates at this resolution rather than deriving it from the input
+            image size.  Useful for generating at the model's native resolution
+            (e.g. 1536×1536 for Illustrious-XL) when the input tile is smaller.
 
         Returns
         -------
@@ -179,6 +186,13 @@ class SDXLPipeline:
             "generator": generator,
         }
 
+        # Pass explicit width/height when provided so the pipeline generates at
+        # the requested resolution (e.g. 1536×1536 for Illustrious-XL native).
+        if target_width is not None:
+            kwargs["width"] = target_width
+        if target_height is not None:
+            kwargs["height"] = target_height
+
         if self._controlnet is not None:
             # Use the input tile as the control image if none provided
             ctrl_img = controlnet_image if controlnet_image is not None else image
@@ -189,13 +203,14 @@ class SDXLPipeline:
             kwargs["ip_adapter_image"] = ip_adapter_image
 
         logger.info(
-            "SDXL generate: steps=%d strength=%.2f cfg=%.1f seed=%s controlnet=%s ip_adapter=%s",
+            "SDXL generate: steps=%d strength=%.2f cfg=%.1f seed=%s controlnet=%s ip_adapter=%s target_size=%s",
             steps,
             strength,
             cfg_scale,
             seed,
             self._controlnet is not None,
             ip_adapter_image is not None,
+            f"{target_width}x{target_height}" if target_width and target_height else "from_image",
         )
 
         result = self._pipe(**kwargs)

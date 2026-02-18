@@ -81,6 +81,16 @@ RESOLUTION_VALUES = {
 # The single active model (hardcoded — only illustrious-xl is supported)
 ACTIVE_MODEL = "illustrious-xl"
 
+# Generation resolution presets: (label, value) where 0 means "same as grid tile size"
+GENERATION_RES_CHOICES = [
+    ("Same as grid", 0),
+    ("1536×1536 ✨ Recommended", 1536),
+    ("2048×2048 (Max detail)", 2048),
+]
+# Map label → value for the dropdown
+_GEN_RES_LABEL_TO_VALUE = {label: val for label, val in GENERATION_RES_CHOICES}
+_GEN_RES_LABELS = [label for label, _ in GENERATION_RES_CHOICES]
+
 
 def _compute_target_size(
     original_size: Tuple[int, int],
@@ -296,14 +306,27 @@ def _upscale_tiles_batch(
     ip_adapter_enabled: bool = False,
     ip_adapter_image: Optional[Image.Image] = None,
     ip_adapter_scale: float = 0.6,
+    # Generation resolution (0 = same as tile_size)
+    gen_res: int = 0,
 ) -> Tuple[List[Dict], Optional[Image.Image], str]:
     """
     Process a batch of tiles (all or selected) through RunPod upscaling.
 
+    If gen_res > tile_size, each tile is upscaled to gen_res before being sent
+    to the backend for generation, then downscaled back to tile_size after
+    receiving the result.  The grid, tile positions, and final assembly all
+    remain at the grid resolution (tile_size).
+
     Returns updated tiles_state, assembled result image, and status text.
     """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
     if not tiles_state or original_img is None:
         return tiles_state, None, "⚠️ No tiles to process."
+
+    # Resolve effective generation resolution — must be >= tile_size
+    effective_gen_res = gen_res if gen_res and gen_res > tile_size else tile_size
 
     target_indices = indices if indices is not None else list(range(len(tiles_state)))
 
@@ -318,9 +341,21 @@ def _upscale_tiles_batch(
     for idx in target_indices:
         tile = tiles_state[idx]
         tile_prompt = tile.get("prompt", "") or ""
+
+        # Upscale tile image to generation resolution if needed
+        tile_img = _b64_to_pil(tile["original_b64"])
+        if effective_gen_res != tile_size:
+            _log.info(
+                "Upscaling tile %s from %dx%d to %dx%d for generation",
+                tile["tile_id"], tile_img.width, tile_img.height,
+                effective_gen_res, effective_gen_res,
+            )
+            tile_img = tile_img.resize((effective_gen_res, effective_gen_res), Image.LANCZOS)
+        tile_b64 = _pil_to_b64(tile_img)
+
         entry: Dict[str, Any] = {
             "tile_id": tile["tile_id"],
-            "image_b64": tile["original_b64"],
+            "image_b64": tile_b64,
             "prompt_override": tile_prompt if tile_prompt else None,
             "model": ACTIVE_MODEL,
             "loras": loras if loras else [],
@@ -334,6 +369,8 @@ def _upscale_tiles_batch(
             "seed": seed,
             "ip_adapter_enabled": ip_adapter_enabled and ip_adapter_b64 is not None,
             "ip_adapter_scale": ip_adapter_scale,
+            "target_width": effective_gen_res,
+            "target_height": effective_gen_res,
         }
         if ip_adapter_b64 is not None:
             entry["ip_adapter_image"] = ip_adapter_b64
@@ -347,7 +384,18 @@ def _upscale_tiles_batch(
     result_map = {r["tile_id"]: r["image_b64"] for r in results}
     for tile in tiles_state:
         if tile["tile_id"] in result_map:
-            tile["processed_b64"] = result_map[tile["tile_id"]]
+            processed_b64 = result_map[tile["tile_id"]]
+            # Downscale back to grid tile size if generation was at higher resolution
+            if effective_gen_res != tile_size:
+                proc_img = _b64_to_pil(processed_b64)
+                _log.info(
+                    "Downscaling processed tile %s from %dx%d back to %dx%d",
+                    tile["tile_id"], proc_img.width, proc_img.height,
+                    tile_size, tile_size,
+                )
+                proc_img = proc_img.resize((tile_size, tile_size), Image.LANCZOS)
+                processed_b64 = _pil_to_b64(proc_img)
+            tile["processed_b64"] = processed_b64
 
     # Assemble result: use processed tiles where available, original elsewhere
     assembled_pairs = []
@@ -361,7 +409,8 @@ def _upscale_tiles_batch(
 
     result_img = blend_tiles(assembled_pairs, original_img.size, tile_size=tile_size, overlap=overlap)
     processed_count = sum(1 for t in tiles_state if t.get("processed_b64"))
-    status = f"✅ Processed {len(results)} tile(s). Total processed: {processed_count}/{len(tiles_state)}."
+    gen_res_label = f" (gen @ {effective_gen_res}px)" if effective_gen_res != tile_size else ""
+    status = f"✅ Processed {len(results)} tile(s){gen_res_label}. Total processed: {processed_count}/{len(tiles_state)}."
     return tiles_state, result_img, status
 
 
@@ -551,6 +600,17 @@ def create_upscale_tab(client: RunPodClient) -> None:
                             scale=1,
                             info="Pixel overlap between adjacent tiles for seamless blending.",
                         )
+                    gen_res_dd = gr.Dropdown(
+                        choices=_GEN_RES_LABELS,
+                        value=_GEN_RES_LABELS[1],  # "1536×1536 ✨ Recommended" default
+                        label="Generation Resolution",
+                        info=(
+                            "Higher generation resolution gives the model more pixels to add detail. "
+                            "1536×1536 is the native Illustrious-XL resolution and recommended for best quality. "
+                            "The tile grid stays at the grid resolution; only individual tiles are upscaled "
+                            "for generation then downscaled back."
+                        ),
+                    )
 
                 # ---- 🎨 Generation Settings ----
                 with gr.Accordion("🎨 Generation Settings", open=True):
@@ -843,6 +903,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
             cn_enabled, cond_scale,
             ip_enabled, ip_img, ip_scale,
             seam_fix_enabled, seam_fix_strength, seam_fix_feather,
+            gen_res_label,
         ):
             """Upscale all tiles and return updated gallery + assembled result.
 
@@ -853,6 +914,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
             """
             tile_size = int(ts)
             overlap   = int(ov)
+            gen_res_val = _GEN_RES_LABEL_TO_VALUE.get(gen_res_label, 0)
 
             # ------------------------------------------------------------------
             # Pass 1 — standard tile grid
@@ -868,6 +930,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
                 ip_adapter_enabled=ip_enabled,
                 ip_adapter_image=ip_img,
                 ip_adapter_scale=ip_scale,
+                gen_res=gen_res_val,
             )
 
             if result is None:
@@ -892,11 +955,18 @@ def create_upscale_tab(client: RunPodClient) -> None:
                             extract_tile(result, ti) for ti in offset_tile_infos
                         ]
 
+                        effective_gen_res = gen_res_val if gen_res_val and gen_res_val > tile_size else tile_size
+
                         # Build payload for the offset pass
                         offset_payload = []
                         for i, (ti, tile_img) in enumerate(
                             zip(offset_tile_infos, offset_tile_imgs)
                         ):
+                            # Upscale offset tile to generation resolution if needed
+                            if effective_gen_res != tile_size:
+                                tile_img = tile_img.resize(
+                                    (effective_gen_res, effective_gen_res), Image.LANCZOS
+                                )
                             entry: Dict[str, Any] = {
                                 "tile_id": f"seam_{ti.row}_{ti.col}",
                                 "image_b64": _pil_to_b64(tile_img),
@@ -912,6 +982,8 @@ def create_upscale_tab(client: RunPodClient) -> None:
                                 "cfg_scale": cfg,
                                 "seed": int(seed),
                                 "ip_adapter_enabled": False,
+                                "target_width": effective_gen_res,
+                                "target_height": effective_gen_res,
                             }
                             offset_payload.append(entry)
 
@@ -926,7 +998,13 @@ def create_upscale_tab(client: RunPodClient) -> None:
                         for ti in offset_tile_infos:
                             tid = f"seam_{ti.row}_{ti.col}"
                             if tid in result_map:
-                                offset_processed.append(_b64_to_pil(result_map[tid]))
+                                proc_img = _b64_to_pil(result_map[tid])
+                                # Downscale back to tile_size if needed
+                                if effective_gen_res != tile_size:
+                                    proc_img = proc_img.resize(
+                                        (tile_size, tile_size), Image.LANCZOS
+                                    )
+                                offset_processed.append(proc_img)
                             else:
                                 # Fallback: use the original extracted tile
                                 offset_processed.append(
@@ -966,6 +1044,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
                 controlnet_cb, cond_scale_sl,
                 ip_adapter_cb, ip_style_image, ip_scale_sl,
                 seam_fix_cb, seam_fix_strength_sl, seam_fix_feather_sl,
+                gen_res_dd,
             ],
             outputs=[tiles_state, tile_gallery, result_image, status_text],
         )
@@ -981,10 +1060,12 @@ def create_upscale_tab(client: RunPodClient) -> None:
             strength, steps, cfg, seed,
             cn_enabled, cond_scale,
             ip_enabled, ip_img, ip_scale,
+            gen_res_label,
         ):
             """Upscale only the currently selected tile."""
             if selected_idx < 0:
                 return tiles, None, None, None, "⚠️ No tile selected. Click a tile in the grid first."
+            gen_res_val = _GEN_RES_LABEL_TO_VALUE.get(gen_res_label, 0)
             updated, result, msg = _upscale_tiles_batch(
                 tiles, [selected_idx], orig_img,
                 loras,
@@ -996,6 +1077,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
                 ip_adapter_enabled=ip_enabled,
                 ip_adapter_image=ip_img,
                 ip_adapter_scale=ip_scale,
+                gen_res=gen_res_val,
             )
             # Refresh gallery and selected tile preview
             gallery_items = _build_gallery_items(updated, selected_idx)
@@ -1013,6 +1095,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
                 strength_sl, steps_sl, cfg_sl, seed_num,
                 controlnet_cb, cond_scale_sl,
                 ip_adapter_cb, ip_style_image, ip_scale_sl,
+                gen_res_dd,
             ],
             outputs=[tiles_state, tile_gallery, tile_proc_preview, result_image, status_text],
         )
