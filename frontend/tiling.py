@@ -282,6 +282,192 @@ def blend_tiles(
 
 
 # ---------------------------------------------------------------------------
+# Seam fix — offset grid calculation and blending
+# ---------------------------------------------------------------------------
+
+def calculate_offset_tiles(
+    image_size: Tuple[int, int],
+    tile_size: int = 1024,
+    overlap: int = 128,
+) -> List[TileInfo]:
+    """
+    Calculate a half-stride offset tile grid for the seam-removal pass.
+
+    The offset grid shifts the origin by ``stride // 2`` pixels in both X and
+    Y directions (where ``stride = tile_size - overlap``).  This places each
+    offset tile so that its centre straddles the seam boundaries produced by
+    the normal grid, giving the diffusion model full context around those seams.
+
+    Tiles that would start before the image boundary are clamped so that they
+    begin at x=0 / y=0 but still cover the same area.  Tiles that extend
+    beyond the right / bottom edge are clamped to the image boundary.
+
+    Args:
+        image_size: (width, height) of the image in pixels.
+        tile_size:  size of each square tile (default 1024).
+        overlap:    number of pixels shared between adjacent tiles (default 128).
+
+    Returns:
+        Ordered list of TileInfo objects (row-major order).
+    """
+    width, height = image_size
+    stride = tile_size - overlap
+
+    if stride <= 0:
+        raise ValueError(f"overlap ({overlap}) must be less than tile_size ({tile_size})")
+
+    offset = stride // 2
+
+    # Number of tiles needed to cover the image starting from -offset.
+    # We need enough tiles so that the last tile reaches the image edge.
+    num_cols = max(1, math.ceil((width + offset - overlap) / stride))
+    num_rows = max(1, math.ceil((height + offset - overlap) / stride))
+
+    tiles: List[TileInfo] = []
+    for row in range(num_rows):
+        for col in range(num_cols):
+            # Raw position (may be negative for the first tile)
+            raw_x = col * stride - offset
+            raw_y = row * stride - offset
+
+            # Clamp start to image boundary
+            x = max(0, raw_x)
+            y = max(0, raw_y)
+
+            # Clamp so the tile does not start past the last valid position
+            x = min(x, max(0, width - tile_size))
+            y = min(y, max(0, height - tile_size))
+
+            w = min(tile_size, width - x)
+            h = min(tile_size, height - y)
+
+            # Skip degenerate tiles (zero area)
+            if w <= 0 or h <= 0:
+                continue
+
+            tiles.append(TileInfo(x=x, y=y, w=w, h=h, row=row, col=col))
+
+    # Deduplicate by (x, y) position — small images can clamp multiple tiles
+    # to the same origin, producing duplicate work sent to the backend.
+    seen: set = set()
+    result: List[TileInfo] = []
+    for tile in tiles:
+        key = (tile.x, tile.y)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(tile)
+    return result
+
+
+def _make_feather_mask(h: int, w: int, feather_size: int) -> np.ndarray:
+    """
+    Build a 2-D float32 feather mask for a tile.
+
+    The mask value at each pixel equals:
+        min(dist_from_left, dist_from_right, dist_from_top, dist_from_bottom)
+        divided by feather_size, clamped to [0, 1].
+
+    This produces a gradient that is 1.0 in the centre and fades to 0.0 at
+    the edges over ``feather_size`` pixels.
+
+    Args:
+        h:            tile height in pixels.
+        w:            tile width in pixels.
+        feather_size: number of pixels over which the fade occurs.
+
+    Returns:
+        float32 ndarray of shape (h, w) with values in [0, 1].
+    """
+    ys = np.arange(h, dtype=np.float32)
+    xs = np.arange(w, dtype=np.float32)
+
+    dist_top    = ys                         # distance from top edge
+    dist_bottom = (h - 1) - ys              # distance from bottom edge
+    dist_left   = xs                         # distance from left edge
+    dist_right  = (w - 1) - xs              # distance from right edge
+
+    # Broadcast to 2-D
+    dist_v = np.minimum(dist_top[:, np.newaxis], dist_bottom[:, np.newaxis])  # (h, 1)
+    dist_h = np.minimum(dist_left[np.newaxis, :], dist_right[np.newaxis, :])  # (1, w)
+
+    min_dist = np.minimum(dist_v, dist_h)  # (h, w)
+
+    mask = np.clip(min_dist / max(feather_size, 1), 0.0, 1.0)
+    return mask
+
+
+def blend_offset_pass(
+    base_image: Image.Image,
+    offset_tiles: List[TileInfo],
+    offset_results: List[Image.Image],
+    feather_size: int = 32,
+) -> Image.Image:
+    """
+    Blend offset-pass tiles onto the base image using feathered masks.
+
+    For each offset tile a gradient mask is created that is 1.0 in the centre
+    and fades to 0.0 at the edges over ``feather_size`` pixels.  The offset
+    tile is composited over the base image using this mask, so that only the
+    central region (where Pass-1 seams lie) is replaced while the edges blend
+    smoothly into the surrounding base image.
+
+    Args:
+        base_image:     The Pass-1 assembled result (PIL Image, RGB).
+        offset_tiles:   List of TileInfo objects describing each offset tile's
+                        position in the full image.
+        offset_results: List of processed PIL Images for each offset tile,
+                        in the same order as ``offset_tiles``.
+        feather_size:   Number of pixels over which the blend fades at tile
+                        edges (default 32).
+
+    Returns:
+        New PIL Image with seams blended away.
+    """
+    if not offset_tiles or not offset_results:
+        return base_image
+
+    img_w, img_h = base_image.size
+    base_arr = np.array(base_image.convert("RGB"), dtype=np.float32)  # (H, W, 3)
+
+    # Accumulate weighted offset tiles
+    blend_acc = np.zeros_like(base_arr)            # weighted sum of offset tile pixels
+    blend_wt  = np.zeros((img_h, img_w), dtype=np.float32)  # total weight per pixel
+
+    for tile_info, tile_img in zip(offset_tiles, offset_results):
+        tile_arr = np.array(tile_img.convert("RGB"), dtype=np.float32)
+        th, tw = tile_arr.shape[:2]
+
+        # Clamp tile dimensions to what actually fits in the image
+        tw = min(tw, img_w - tile_info.x)
+        th = min(th, img_h - tile_info.y)
+        if tw <= 0 or th <= 0:
+            continue
+
+        tile_arr = tile_arr[:th, :tw]
+
+        mask = _make_feather_mask(th, tw, feather_size)  # (th, tw)
+
+        y1, y2 = tile_info.y, tile_info.y + th
+        x1, x2 = tile_info.x, tile_info.x + tw
+
+        blend_acc[y1:y2, x1:x2] += tile_arr * mask[:, :, np.newaxis]
+        blend_wt[y1:y2, x1:x2]  += mask
+
+    # Composite: result = offset_avg * alpha + base * (1 - alpha)
+    # where alpha = blend_wt clamped to [0, 1]
+    alpha = np.clip(blend_wt, 0.0, 1.0)[:, :, np.newaxis]  # (H, W, 1)
+
+    # Where blend_wt > 0, compute the weighted average of offset tiles
+    safe_wt = np.where(blend_wt > 0, blend_wt, 1.0)[:, :, np.newaxis]
+    offset_avg = blend_acc / safe_wt  # (H, W, 3)
+
+    result_arr = offset_avg * alpha + base_arr * (1.0 - alpha)
+    result_arr = np.clip(result_arr, 0, 255).astype(np.uint8)
+    return Image.fromarray(result_arr, mode="RGB")
+
+
+# ---------------------------------------------------------------------------
 # Grid overlay visualisation
 # ---------------------------------------------------------------------------
 

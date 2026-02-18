@@ -1,13 +1,15 @@
 """
 ModelManager — singleton responsible for dynamic model loading/unloading.
 
-All model weights are expected to reside on the RunPod Network Volume mounted
-at ``/runpod-volume/``.  The directory layout mirrors the architecture doc:
+All core model weights are pre-downloaded into the Docker image at build time
+and stored in ``/app/hf_cache`` (the ``HF_HOME`` baked into the image).
+At runtime the manager loads from that local cache with ``local_files_only=True``
+so there are zero network calls for precached models.
 
-    /runpod-volume/models/
-        checkpoints/   — SDXL / Flux base checkpoints (HF snapshot dirs)
-        loras/         — LoRA .safetensors files
-        controlnets/   — ControlNet model dirs
+LoRA adapters are the only models loaded dynamically at runtime; they are
+expected to reside on the RunPod Network Volume at:
+
+    /runpod-volume/models/loras/   — LoRA .safetensors files
 """
 
 import gc
@@ -20,9 +22,19 @@ import torch
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Network-volume paths
+# Precached HF cache path (baked into the Docker image at build time)
 # ---------------------------------------------------------------------------
-VOLUME_ROOT = "/runpod-volume"
+HF_CACHE_DIR = os.environ.get("HF_HOME", "/app/hf_cache")
+
+# ---------------------------------------------------------------------------
+# RunPod Cached Model directory (populated by RunPod's model caching feature)
+# ---------------------------------------------------------------------------
+RUNPOD_CACHE_DIR = os.environ.get("RUNPOD_MODEL_CACHE", "/runpod-volume/huggingface-cache/hub")
+
+# ---------------------------------------------------------------------------
+# Network-volume paths (LoRAs + outputs only at runtime)
+# ---------------------------------------------------------------------------
+VOLUME_ROOT = os.environ.get("RUNPOD_VOLUME_PATH", "/runpod-volume")
 MODELS_ROOT = os.path.join(VOLUME_ROOT, "models")
 CHECKPOINTS_DIR = os.path.join(MODELS_ROOT, "checkpoints")
 LORAS_DIR = os.path.join(MODELS_ROOT, "loras")
@@ -30,39 +42,27 @@ CONTROLNETS_DIR = os.path.join(MODELS_ROOT, "controlnets")
 
 # ---------------------------------------------------------------------------
 # Supported model registry
-# Maps short model names → HuggingFace repo IDs (or local paths on the volume)
+# Maps short model names → HuggingFace repo IDs
 # ---------------------------------------------------------------------------
 CHECKPOINT_MODELS: dict[str, str] = {
-    # TODO: verify HF path — replace with actual Z-Image SDXL repo if different
-    "z-image-xl": "stabilityai/stable-diffusion-xl-base-1.0",
-    # TODO: verify HF path — AstraliteHeart/pony-diffusion-v6-xl may not be the canonical name
-    "pony-v6": "AstraliteHeart/pony-diffusion-v6-xl",
-    # TODO: verify HF path — OnomaAIResearch/Illustrious-xl-early-release-v0
     "illustrious-xl": "OnomaAIResearch/Illustrious-xl-early-release-v0",
-    "flux-dev": "black-forest-labs/FLUX.1-dev",
 }
 
 CONTROLNET_MODELS: dict[str, str] = {
-    # TODO: verify HF path — xinsir/controlnet-tile-sdxl-1.0
     "sdxl-tile": "xinsir/controlnet-tile-sdxl-1.0",
-    # TODO: verify HF path — jasperai/Flux.1-dev-Controlnet-Upscaler or similar
-    "flux-tile": "jasperai/Flux.1-dev-Controlnet-Upscaler",
 }
 
 QWEN_MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
-
-
-def _is_flux_model(model_name: str) -> bool:
-    return "flux" in model_name.lower()
 
 
 class ModelManager:
     """
     Singleton that owns all loaded model objects.
 
-    Only one diffusion model (SDXL or Flux) and one utility model (Qwen) are
-    kept in VRAM at a time.  When a different model is requested the current
-    one is deleted and the CUDA cache is cleared before loading the new one.
+    Only one diffusion model (SDXL/Illustrious) and one utility model (Qwen)
+    are kept in VRAM at a time.  When a different model is requested the
+    current one is deleted and the CUDA cache is cleared before loading the
+    new one.
     """
 
     _instance: Optional["ModelManager"] = None
@@ -82,7 +82,7 @@ class ModelManager:
     # ------------------------------------------------------------------
 
     def __init__(self) -> None:
-        # Diffusion pipeline (SDXL or Flux)
+        # Diffusion pipeline (SDXL/Illustrious)
         self._diffusion_pipe: Any = None
         self._diffusion_model_name: Optional[str] = None
 
@@ -98,13 +98,23 @@ class ModelManager:
         # Track which LoRA is currently fused
         self._active_lora: Optional[str] = None
 
+        # IP-Adapter state
+        self._ip_adapter_loaded: bool = False
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
+    @property
+    def diffusion_pipe(self) -> Any:
+        """Public accessor for the loaded diffusion pipeline."""
+        if self._diffusion_pipe is None:
+            raise RuntimeError("No diffusion model loaded. Call load_diffusion_model() first.")
+        return self._diffusion_pipe
+
     def load_diffusion_model(self, model_name: str) -> Any:
         """
-        Load a diffusion model by short name (e.g. ``"z-image-xl"``).
+        Load a diffusion model by short name (e.g. ``"illustrious-xl"``).
 
         If the requested model is already loaded, returns the existing pipeline
         without reloading.  Otherwise unloads the current model first.
@@ -118,10 +128,7 @@ class ModelManager:
         hf_path = self._resolve_checkpoint_path(model_name)
         logger.info("Loading diffusion model '%s' from '%s'", model_name, hf_path)
 
-        if _is_flux_model(model_name):
-            self._diffusion_pipe = self._load_flux(hf_path)
-        else:
-            self._diffusion_pipe = self._load_sdxl(hf_path)
+        self._diffusion_pipe = self._load_sdxl(hf_path)
 
         self._diffusion_model_name = model_name
         self._active_lora = None
@@ -134,33 +141,72 @@ class ModelManager:
 
         Returns ``(model, processor)`` tuple.  Unloads any currently loaded
         diffusion model first to free VRAM.
+
+        Loading priority:
+        1. RunPod Cached Model directory (RUNPOD_MODEL_CACHE / network volume)
+        2. Baked-in Docker image HF cache (local_files_only=True)
+        3. Live HuggingFace download (last resort)
         """
         if self._qwen_loaded and self._qwen_model is not None:
             logger.info("Qwen already loaded — reusing")
             return self._qwen_model, self._qwen_processor
 
-        # Unload diffusion model to free VRAM before loading Qwen (~18 GB)
+        # Unload diffusion model to free VRAM before loading Qwen (~15 GB)
         self.unload_current()
-
-        logger.info("Loading Qwen2.5-VL-7B from '%s'", QWEN_MODEL_ID)
 
         from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 
-        cache_dir = os.path.join(MODELS_ROOT, "qwen", "qwen2.5-vl-7b")
-        os.makedirs(cache_dir, exist_ok=True)
+        # --- 1. Try RunPod Cached Model path ---
+        runpod_path = self._find_runpod_cached_model(QWEN_MODEL_ID)
+        if runpod_path is not None:
+            logger.info(
+                "Loading Qwen2.5-VL-7B from RunPod cache: %s", runpod_path
+            )
+            self._qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
+                runpod_path,
+                torch_dtype=torch.float16,
+                device_map="auto",
+            )
+            self._qwen_processor = AutoProcessor.from_pretrained(runpod_path)
+            self._qwen_loaded = True
+            logger.info("Qwen2.5-VL-7B loaded successfully (source: RunPod cache)")
+            return self._qwen_model, self._qwen_processor
 
+        # --- 2. Try baked-in Docker image HF cache ---
+        logger.info(
+            "RunPod cache not found; trying baked-in HF cache at '%s'", HF_CACHE_DIR
+        )
+        try:
+            self._qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
+                QWEN_MODEL_ID,
+                torch_dtype=torch.float16,
+                device_map="auto",
+                cache_dir=HF_CACHE_DIR,
+                local_files_only=True,
+            )
+            self._qwen_processor = AutoProcessor.from_pretrained(
+                QWEN_MODEL_ID,
+                cache_dir=HF_CACHE_DIR,
+                local_files_only=True,
+            )
+            self._qwen_loaded = True
+            logger.info("Qwen2.5-VL-7B loaded successfully (source: baked-in HF cache)")
+            return self._qwen_model, self._qwen_processor
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(
+                "Baked-in HF cache miss for Qwen — falling back to live download: %s", exc
+            )
+
+        # --- 3. Last resort: live HuggingFace download ---
+        logger.info("Downloading Qwen2.5-VL-7B from HuggingFace (last resort)")
         self._qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
             QWEN_MODEL_ID,
             torch_dtype=torch.float16,
             device_map="auto",
-            cache_dir=cache_dir,
         )
-        self._qwen_processor = AutoProcessor.from_pretrained(
-            QWEN_MODEL_ID,
-            cache_dir=cache_dir,
-        )
+        self._qwen_processor = AutoProcessor.from_pretrained(QWEN_MODEL_ID)
         self._qwen_loaded = True
-        logger.info("Qwen2.5-VL-7B loaded successfully")
+        logger.info("Qwen2.5-VL-7B loaded successfully (source: live HF download)")
         return self._qwen_model, self._qwen_processor
 
     def load_controlnet(self, model_name: str) -> Any:
@@ -183,7 +229,8 @@ class ModelManager:
         self._controlnet = ControlNetModel.from_pretrained(
             hf_path,
             torch_dtype=torch.float16,
-            cache_dir=os.path.join(CONTROLNETS_DIR, model_name),
+            cache_dir=HF_CACHE_DIR,
+            local_files_only=True,
         )
         self._controlnet_name = model_name
         logger.info("ControlNet '%s' loaded successfully", model_name)
@@ -230,6 +277,7 @@ class ModelManager:
             self._diffusion_pipe = None
             self._diffusion_model_name = None
             self._active_lora = None
+            self._ip_adapter_loaded = False
 
         if self._controlnet is not None:
             logger.info("Unloading ControlNet '%s'", self._controlnet_name)
@@ -258,10 +306,82 @@ class ModelManager:
                 "name": self._diffusion_model_name,
                 "lora": self._active_lora,
                 "controlnet": self._controlnet_name,
+                "ip_adapter_loaded": self._ip_adapter_loaded,
             }
         if self._qwen_loaded:
             return {"type": "qwen", "name": "Qwen2.5-VL-7B"}
         return None
+
+    def load_ip_adapter(self, scale: float = 0.6) -> None:
+        """
+        Load IP-Adapter weights onto the current SDXL pipeline.
+
+        Uses the pre-cached ``h94/IP-Adapter`` weights (sdxl_models subfolder).
+        Sets the adapter scale immediately after loading.
+
+        Parameters
+        ----------
+        scale:
+            IP-Adapter influence scale (0.0–1.0).  Default 0.6.
+        """
+        if self._diffusion_pipe is None:
+            raise RuntimeError("No diffusion model loaded; cannot load IP-Adapter")
+
+        if self._ip_adapter_loaded:
+            # Already loaded — just update the scale
+            logger.info("IP-Adapter already loaded — updating scale to %.2f", scale)
+            try:
+                self._diffusion_pipe.set_ip_adapter_scale(scale)
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.warning("Could not update IP-Adapter scale: %s", exc)
+            return
+
+        logger.info(
+            "Loading IP-Adapter (sdxl_models/ip-adapter_sdxl_vit-h.safetensors) scale=%.2f",
+            scale,
+        )
+        try:
+            self._diffusion_pipe.load_ip_adapter(
+                "h94/IP-Adapter",
+                subfolder="sdxl_models",
+                weight_name="ip-adapter_sdxl_vit-h.safetensors",
+                cache_dir=HF_CACHE_DIR,
+                local_files_only=True,
+            )
+            self._diffusion_pipe.set_ip_adapter_scale(scale)
+            self._ip_adapter_loaded = True
+            logger.info("IP-Adapter loaded successfully (scale=%.2f)", scale)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(
+                "Failed to load IP-Adapter — continuing without it: %s", exc
+            )
+
+    def unload_ip_adapter(self) -> None:
+        """
+        Unload IP-Adapter from the current SDXL pipeline to free VRAM.
+
+        Sets scale to 0 first (safe fallback), then calls ``unload_ip_adapter()``
+        if the pipeline supports it.
+        """
+        if not self._ip_adapter_loaded or self._diffusion_pipe is None:
+            return
+
+        logger.info("Unloading IP-Adapter")
+        try:
+            # Set scale to 0 as a safe fallback before unloading
+            self._diffusion_pipe.set_ip_adapter_scale(0.0)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("Could not set IP-Adapter scale to 0: %s", exc)
+
+        try:
+            self._diffusion_pipe.unload_ip_adapter()
+            logger.info("IP-Adapter unloaded successfully")
+        except AttributeError:
+            logger.info("Pipeline does not support unload_ip_adapter() — scale set to 0")
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("Could not unload IP-Adapter: %s", exc)
+
+        self._ip_adapter_loaded = False
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -269,14 +389,17 @@ class ModelManager:
 
     def _resolve_checkpoint_path(self, model_name: str) -> str:
         """
-        Return the local path or HF repo ID for a checkpoint.
+        Return the HF repo ID for a checkpoint.
 
-        Prefers a local directory on the network volume; falls back to the
-        HuggingFace repo ID so diffusers can download it automatically.
+        The actual weights are loaded from the precached HF cache at
+        ``HF_CACHE_DIR`` (``/app/hf_cache``) via ``local_files_only=True``
+        in ``_load_sdxl``.  A network-volume local directory is also checked
+        first as an override path (useful for development / custom checkpoints).
         """
+        # Allow network-volume override (e.g. custom checkpoints placed there)
         local_path = os.path.join(CHECKPOINTS_DIR, model_name)
         if os.path.isdir(local_path):
-            logger.debug("Using local checkpoint path: %s", local_path)
+            logger.debug("Using network-volume checkpoint override: %s", local_path)
             return local_path
 
         hf_id = CHECKPOINT_MODELS.get(model_name)
@@ -285,10 +408,12 @@ class ModelManager:
                 f"Unknown model '{model_name}'. "
                 f"Available: {list(CHECKPOINT_MODELS.keys())}"
             )
-        logger.debug("Local checkpoint not found; using HF repo: %s", hf_id)
+        # Return the HF repo ID; _load_sdxl will resolve it from HF_CACHE_DIR
+        logger.debug("Using precached HF repo: %s (cache: %s)", hf_id, HF_CACHE_DIR)
         return hf_id
 
     def _resolve_controlnet_path(self, model_name: str) -> str:
+        # Allow network-volume override
         local_path = os.path.join(CONTROLNETS_DIR, model_name)
         if os.path.isdir(local_path):
             return local_path
@@ -299,6 +424,7 @@ class ModelManager:
                 f"Unknown ControlNet '{model_name}'. "
                 f"Available: {list(CONTROLNET_MODELS.keys())}"
             )
+        # Return the HF repo ID; load_controlnet will resolve from HF_CACHE_DIR
         return hf_id
 
     def _resolve_lora_path(self, lora_name: str) -> str:
@@ -311,6 +437,33 @@ class ModelManager:
             f"LoRA '{lora_name}' not found in '{LORAS_DIR}'"
         )
 
+    def _find_runpod_cached_model(self, model_id: str) -> Optional[str]:
+        """
+        Check if a model exists in RunPod's cached model directory.
+
+        RunPod's model caching feature stores models under:
+            <RUNPOD_CACHE_DIR>/models--<org>--<name>/snapshots/<hash>/
+
+        Returns the path to the first available snapshot, or ``None`` if the
+        model is not present in the RunPod cache.
+        """
+        cache_name = model_id.replace("/", "--")
+        snapshots_dir = os.path.join(
+            RUNPOD_CACHE_DIR, f"models--{cache_name}", "snapshots"
+        )
+        if os.path.exists(snapshots_dir):
+            snapshots = os.listdir(snapshots_dir)
+            if snapshots:
+                snapshot_path = os.path.join(snapshots_dir, snapshots[0])
+                logger.debug(
+                    "Found RunPod cached model '%s' at: %s", model_id, snapshot_path
+                )
+                return snapshot_path
+        logger.debug(
+            "RunPod cached model '%s' not found (checked: %s)", model_id, snapshots_dir
+        )
+        return None
+
     # ------------------------------------------------------------------
     # Model loading helpers
     # ------------------------------------------------------------------
@@ -318,27 +471,26 @@ class ModelManager:
     def _load_sdxl(self, model_path: str) -> Any:
         from diffusers import StableDiffusionXLImg2ImgPipeline
 
-        cache_dir = CHECKPOINTS_DIR
-        pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
-            model_path,
-            torch_dtype=torch.float16,
-            use_safetensors=True,
-            variant="fp16",
-            cache_dir=cache_dir,
-        )
-        pipe = pipe.to("cuda")
-        pipe.enable_model_cpu_offload()
-        return pipe
+        # If model_path is an absolute local directory (network-volume override),
+        # load directly without cache_dir / local_files_only constraints.
+        # Otherwise use the precached HF cache with local_files_only=True.
+        is_local_dir = os.path.isabs(model_path) and os.path.isdir(model_path)
 
-    def _load_flux(self, model_path: str) -> Any:
-        from diffusers import FluxImg2ImgPipeline
+        kwargs: dict = {
+            "torch_dtype": torch.float16,
+            "use_safetensors": True,
+            "variant": "fp16",
+        }
+        if is_local_dir:
+            logger.info("Loading SDXL from local directory override: %s", model_path)
+        else:
+            kwargs["cache_dir"] = HF_CACHE_DIR
+            kwargs["local_files_only"] = True
 
-        cache_dir = CHECKPOINTS_DIR
-        pipe = FluxImg2ImgPipeline.from_pretrained(
-            model_path,
-            torch_dtype=torch.float16,
-            cache_dir=cache_dir,
-        )
-        pipe = pipe.to("cuda")
+        pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(model_path, **kwargs)
+        # NOTE: enable_model_cpu_offload() manages device placement automatically.
+        # Do NOT call pipe.to("cuda") before it — that would defeat CPU offloading
+        # by moving all weights to VRAM upfront, preventing SDXL + ControlNet +
+        # IP-Adapter from sharing VRAM by offloading inactive components to CPU RAM.
         pipe.enable_model_cpu_offload()
         return pipe

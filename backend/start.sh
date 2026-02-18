@@ -3,8 +3,15 @@
 # AI Assets Toolbox — RunPod Worker Startup Script
 # ============================================================
 # This script is called by the Dockerfile CMD.
-# It ensures required directories exist on the network volume
-# and then starts the RunPod serverless handler.
+#
+# All core models (Illustrious-XL, ControlNet Tile, SDXL VAE,
+# Qwen2.5-VL-7B, IP-Adapter) are pre-downloaded into the Docker
+# image at /app/hf_cache during build time — no model downloads
+# happen at startup.
+#
+# The network volume is used only for:
+#   - LoRA .safetensors files (dynamic, user-uploaded)
+#   - Output images
 # ============================================================
 
 set -euo pipefail
@@ -12,16 +19,13 @@ set -euo pipefail
 echo "[start.sh] Starting AI Assets Toolbox RunPod worker"
 
 # ---------------------------------------------------------------------------
-# Ensure network volume directories exist
+# Ensure network volume directories exist (LoRAs + outputs only)
 # ---------------------------------------------------------------------------
 VOLUME_ROOT="${RUNPOD_VOLUME_PATH:-/runpod-volume}"
 
-echo "[start.sh] Ensuring model directories under ${VOLUME_ROOT}/models/"
+echo "[start.sh] Ensuring runtime directories under ${VOLUME_ROOT}/"
 mkdir -p \
-    "${VOLUME_ROOT}/models/checkpoints" \
     "${VOLUME_ROOT}/models/loras" \
-    "${VOLUME_ROOT}/models/controlnets" \
-    "${VOLUME_ROOT}/hf_cache" \
     "${VOLUME_ROOT}/outputs"
 
 echo "[start.sh] Directory structure ready"

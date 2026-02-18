@@ -1,18 +1,17 @@
 """
 Region-based upscale action handler.
 
-Processes image regions through a diffusion img2img pipeline (SDXL or Flux)
-with optional LoRA and ControlNet conditioning. Each region is extracted from
-the source image with padding applied, processed individually with its own
-prompt, and returned as an upscaled region.
+Processes image regions through a diffusion img2img pipeline (SDXL/Illustrious)
+with optional LoRA, ControlNet, and IP-Adapter conditioning. Each region is
+extracted from the source image with padding applied, processed individually
+with its own prompt, and returned as an upscaled region.
 
 Request schema
 --------------
 {
     "action": "upscale_regions",
     "model_config": {
-        "base_model": "z-image-xl",   # short model name
-        "model_type": "sdxl",         # "sdxl" | "flux"
+        "base_model": "illustrious-xl",   # short model name
         "loras": [
             {"name": "detail-enhancer", "weight": 0.7}
         ],
@@ -30,6 +29,9 @@ Request schema
     },
     "global_prompt": "masterpiece, best quality",
     "negative_prompt": "blurry, low quality",
+    "ip_adapter_enabled": false,
+    "ip_adapter_image": "<base64>",
+    "ip_adapter_scale": 0.6,
     "source_image_b64": "<base64>",  # Original full image
     "target_resolution": {"width": 8192, "height": 8192},
     "regions": [
@@ -63,7 +65,7 @@ import logging
 import random
 from typing import Any, Optional
 
-from model_manager import ModelManager, _is_flux_model
+from model_manager import ModelManager
 from utils.image_utils import b64_to_pil, pil_to_b64
 
 logger = logging.getLogger(__name__)
@@ -92,6 +94,11 @@ def handle_upscale_regions(job_input: dict[str, Any]) -> dict[str, Any]:
     target_resolution: dict[str, int] = job_input.get("target_resolution", {})
     regions: list[dict[str, Any]] = job_input.get("regions", [])
 
+    # IP-Adapter params (all optional)
+    ip_adapter_enabled: bool = bool(job_input.get("ip_adapter_enabled", False))
+    ip_adapter_image_b64: Optional[str] = job_input.get("ip_adapter_image")
+    ip_adapter_scale: float = float(job_input.get("ip_adapter_scale", 0.6))
+
     if not source_image_b64:
         raise ValueError("No 'source_image_b64' provided in upscale_regions request")
 
@@ -101,7 +108,7 @@ def handle_upscale_regions(job_input: dict[str, Any]) -> dict[str, Any]:
     # ------------------------------------------------------------------
     # Parse model config
     # ------------------------------------------------------------------
-    base_model: str = model_config.get("base_model", "z-image-xl")
+    base_model: str = model_config.get("base_model", "illustrious-xl")
     loras: list[dict[str, Any]] = model_config.get("loras", [])
     controlnet_cfg: dict[str, Any] = model_config.get("controlnet", {})
     controlnet_enabled: bool = controlnet_cfg.get("enabled", False)
@@ -117,12 +124,13 @@ def handle_upscale_regions(job_input: dict[str, Any]) -> dict[str, Any]:
     base_seed: Optional[int] = gen_params.get("seed")
 
     logger.info(
-        "Upscale regions action: model='%s' regions=%d steps=%d strength=%.2f controlnet=%s",
+        "Upscale regions action: model='%s' regions=%d steps=%d strength=%.2f controlnet=%s ip_adapter=%s",
         base_model,
         len(regions),
         steps,
         strength,
         controlnet_enabled,
+        ip_adapter_enabled,
     )
 
     # ------------------------------------------------------------------
@@ -151,10 +159,26 @@ def handle_upscale_regions(job_input: dict[str, Any]) -> dict[str, Any]:
                 manager.apply_lora(lora_name_val, weight=lora_weight_val)
 
     # ------------------------------------------------------------------
+    # IP-Adapter: load or unload as needed
+    # ------------------------------------------------------------------
+    ip_adapter_pil: Optional[Any] = None
+    if ip_adapter_enabled and ip_adapter_image_b64:
+        manager.load_ip_adapter(scale=ip_adapter_scale)
+        if manager._ip_adapter_loaded:
+            raw_ip_img = b64_to_pil(ip_adapter_image_b64)
+            # Resize to 224×224 as expected by the ViT-H CLIP image encoder
+            ip_adapter_pil = raw_ip_img.resize((224, 224))
+            logger.info("IP-Adapter style image prepared (224×224)")
+        else:
+            logger.warning("IP-Adapter requested but failed to load — proceeding without it")
+    else:
+        # Ensure IP-Adapter is unloaded when not needed
+        manager.unload_ip_adapter()
+
+    # ------------------------------------------------------------------
     # Build the pipeline wrapper
     # ------------------------------------------------------------------
-    is_flux = _is_flux_model(base_model)
-    pipe = manager._diffusion_pipe  # access the raw pipeline
+    pipe = manager.diffusion_pipe  # access the raw pipeline via public property
 
     # ------------------------------------------------------------------
     # Process regions
@@ -231,28 +255,19 @@ def handle_upscale_regions(job_input: dict[str, Any]) -> dict[str, Any]:
             prompt[:50] + "..." if len(prompt) > 50 else prompt,
         )
 
-        if is_flux:
-            output_image = _run_flux(
-                pipe=pipe,
-                image=region_image,
-                prompt=prompt,
-                strength=strength,
-                steps=steps,
-                seed=region_seed,
-            )
-        else:
-            output_image = _run_sdxl(
-                pipe=pipe,
-                image=region_image,
-                prompt=prompt,
-                negative_prompt=neg_prompt,
-                strength=strength,
-                steps=steps,
-                cfg_scale=cfg_scale,
-                seed=region_seed,
-                controlnet_enabled=controlnet_enabled,
-                controlnet_conditioning_scale=controlnet_conditioning_scale,
-            )
+        output_image = _run_sdxl(
+            pipe=pipe,
+            image=region_image,
+            prompt=prompt,
+            negative_prompt=neg_prompt,
+            strength=strength,
+            steps=steps,
+            cfg_scale=cfg_scale,
+            seed=region_seed,
+            controlnet_enabled=controlnet_enabled,
+            controlnet_conditioning_scale=controlnet_conditioning_scale,
+            ip_adapter_image=ip_adapter_pil,
+        )
 
         result_b64 = pil_to_b64(output_image)
         results.append({
@@ -282,6 +297,7 @@ def _run_sdxl(
     seed: int,
     controlnet_enabled: bool,
     controlnet_conditioning_scale: float,
+    ip_adapter_image: Optional[Any] = None,
 ) -> Any:
     import torch
 
@@ -299,26 +315,10 @@ def _run_sdxl(
         kwargs["control_image"] = image
         kwargs["controlnet_conditioning_scale"] = controlnet_conditioning_scale
 
+    if ip_adapter_image is not None:
+        kwargs["ip_adapter_image"] = ip_adapter_image
+
     result = pipe(**kwargs)
     return result.images[0]
 
 
-def _run_flux(
-    pipe: Any,
-    image: Any,
-    prompt: str,
-    strength: float,
-    steps: int,
-    seed: int,
-) -> Any:
-    import torch
-
-    generator = torch.Generator(device="cuda").manual_seed(seed)
-    result = pipe(
-        prompt=prompt,
-        image=image,
-        strength=strength,
-        num_inference_steps=steps,
-        generator=generator,
-    )
-    return result.images[0]

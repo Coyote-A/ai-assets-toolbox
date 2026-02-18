@@ -7,7 +7,7 @@ RunPod Network Volume.
 Directory layout on the volume
 -------------------------------
 /runpod-volume/models/
-    checkpoints/   — SDXL / Flux base checkpoints
+    checkpoints/   — SDXL base checkpoints
     loras/         — LoRA .safetensors files
     controlnets/   — ControlNet model dirs
 """

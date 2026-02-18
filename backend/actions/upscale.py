@@ -1,16 +1,15 @@
 """
 Upscale action handler.
 
-Processes image tiles through a diffusion img2img pipeline (SDXL or Flux)
-with optional LoRA and ControlNet conditioning.
+Processes image tiles through a diffusion img2img pipeline (SDXL/Illustrious)
+with optional LoRA, ControlNet, and IP-Adapter conditioning.
 
 Request schema
 --------------
 {
     "action": "upscale",
     "model_config": {
-        "base_model": "z-image-xl",   # short model name
-        "model_type": "sdxl",         # "sdxl" | "flux"
+        "base_model": "illustrious-xl",   # short model name
         "loras": [
             {"name": "detail-enhancer", "weight": 0.7}
         ],
@@ -28,6 +27,9 @@ Request schema
     },
     "global_prompt": "masterpiece, best quality",
     "negative_prompt": "blurry, low quality",
+    "ip_adapter_enabled": false,
+    "ip_adapter_image": "<base64>",
+    "ip_adapter_scale": 0.6,
     "tiles": [
         {
             "tile_id": "0_0",
@@ -51,7 +53,7 @@ import logging
 import random
 from typing import Any, Optional
 
-from model_manager import ModelManager, CHECKPOINT_MODELS, CONTROLNET_MODELS, _is_flux_model
+from model_manager import ModelManager, CHECKPOINT_MODELS, CONTROLNET_MODELS
 from utils.image_utils import b64_to_pil, pil_to_b64
 
 logger = logging.getLogger(__name__)
@@ -77,13 +79,18 @@ def handle_upscale(job_input: dict[str, Any]) -> dict[str, Any]:
     negative_prompt: str = job_input.get("negative_prompt", "")
     tiles: list[dict[str, Any]] = job_input.get("tiles", [])
 
+    # IP-Adapter params (all optional)
+    ip_adapter_enabled: bool = bool(job_input.get("ip_adapter_enabled", False))
+    ip_adapter_image_b64: Optional[str] = job_input.get("ip_adapter_image")
+    ip_adapter_scale: float = float(job_input.get("ip_adapter_scale", 0.6))
+
     if not tiles:
         raise ValueError("No 'tiles' provided in upscale request")
 
     # ------------------------------------------------------------------
     # Parse model config
     # ------------------------------------------------------------------
-    base_model: str = model_config.get("base_model", "z-image-xl")
+    base_model: str = model_config.get("base_model", "illustrious-xl")
     loras: list[dict[str, Any]] = model_config.get("loras", [])
     controlnet_cfg: dict[str, Any] = model_config.get("controlnet", {})
     controlnet_enabled: bool = controlnet_cfg.get("enabled", False)
@@ -99,12 +106,13 @@ def handle_upscale(job_input: dict[str, Any]) -> dict[str, Any]:
     base_seed: Optional[int] = gen_params.get("seed")
 
     logger.info(
-        "Upscale action: model='%s' tiles=%d steps=%d strength=%.2f controlnet=%s",
+        "Upscale action: model='%s' tiles=%d steps=%d strength=%.2f controlnet=%s ip_adapter=%s",
         base_model,
         len(tiles),
         steps,
         strength,
         controlnet_enabled,
+        ip_adapter_enabled,
     )
 
     # ------------------------------------------------------------------
@@ -123,10 +131,26 @@ def handle_upscale(job_input: dict[str, Any]) -> dict[str, Any]:
                 manager.apply_lora(lora_name_val, weight=lora_weight_val)
 
     # ------------------------------------------------------------------
+    # IP-Adapter: load or unload as needed
+    # ------------------------------------------------------------------
+    ip_adapter_pil: Optional[Any] = None
+    if ip_adapter_enabled and ip_adapter_image_b64:
+        manager.load_ip_adapter(scale=ip_adapter_scale)
+        if manager._ip_adapter_loaded:
+            raw_ip_img = b64_to_pil(ip_adapter_image_b64)
+            # Resize to 224×224 as expected by the ViT-H CLIP image encoder
+            ip_adapter_pil = raw_ip_img.resize((224, 224))
+            logger.info("IP-Adapter style image prepared (224×224)")
+        else:
+            logger.warning("IP-Adapter requested but failed to load — proceeding without it")
+    else:
+        # Ensure IP-Adapter is unloaded when not needed
+        manager.unload_ip_adapter()
+
+    # ------------------------------------------------------------------
     # Build the pipeline wrapper
     # ------------------------------------------------------------------
-    is_flux = _is_flux_model(base_model)
-    pipe = manager._diffusion_pipe  # access the raw pipeline
+    pipe = manager.diffusion_pipe  # access the raw pipeline via public property
 
     # ------------------------------------------------------------------
     # Process tiles
@@ -161,28 +185,19 @@ def handle_upscale(job_input: dict[str, Any]) -> dict[str, Any]:
             tile_seed,
         )
 
-        if is_flux:
-            output_image = _run_flux(
-                pipe=pipe,
-                image=pil_image,
-                prompt=prompt,
-                strength=strength,
-                steps=steps,
-                seed=tile_seed,
-            )
-        else:
-            output_image = _run_sdxl(
-                pipe=pipe,
-                image=pil_image,
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                strength=strength,
-                steps=steps,
-                cfg_scale=cfg_scale,
-                seed=tile_seed,
-                controlnet_enabled=controlnet_enabled,
-                controlnet_conditioning_scale=controlnet_conditioning_scale,
-            )
+        output_image = _run_sdxl(
+            pipe=pipe,
+            image=pil_image,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            strength=strength,
+            steps=steps,
+            cfg_scale=cfg_scale,
+            seed=tile_seed,
+            controlnet_enabled=controlnet_enabled,
+            controlnet_conditioning_scale=controlnet_conditioning_scale,
+            ip_adapter_image=ip_adapter_pil,
+        )
 
         result_b64 = pil_to_b64(output_image)
         results.append({"tile_id": tile_id, "image_b64": result_b64, "seed_used": tile_seed})
@@ -206,6 +221,7 @@ def _run_sdxl(
     seed: int,
     controlnet_enabled: bool,
     controlnet_conditioning_scale: float,
+    ip_adapter_image: Optional[Any] = None,
 ) -> Any:
     import torch
 
@@ -223,26 +239,11 @@ def _run_sdxl(
         kwargs["control_image"] = image
         kwargs["controlnet_conditioning_scale"] = controlnet_conditioning_scale
 
+    if ip_adapter_image is not None:
+        kwargs["ip_adapter_image"] = ip_adapter_image
+
     result = pipe(**kwargs)
     return result.images[0]
 
 
-def _run_flux(
-    pipe: Any,
-    image: Any,
-    prompt: str,
-    strength: float,
-    steps: int,
-    seed: int,
-) -> Any:
-    import torch
 
-    generator = torch.Generator(device="cuda").manual_seed(seed)
-    result = pipe(
-        prompt=prompt,
-        image=image,
-        strength=strength,
-        num_inference_steps=steps,
-        generator=generator,
-    )
-    return result.images[0]

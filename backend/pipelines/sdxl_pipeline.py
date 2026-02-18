@@ -129,6 +129,7 @@ class SDXLPipeline:
         seed: Optional[int] = None,
         controlnet_image: Optional[Image.Image] = None,
         controlnet_conditioning_scale: float = 0.6,
+        ip_adapter_image: Optional[Image.Image] = None,
     ) -> Image.Image:
         """
         Run SDXL img2img generation.
@@ -154,6 +155,10 @@ class SDXLPipeline:
             pipeline has ControlNet, ``image`` is used as the control image.
         controlnet_conditioning_scale:
             Strength of ControlNet conditioning (0.0–1.5).
+        ip_adapter_image:
+            Optional PIL Image used as the IP-Adapter style reference.  When
+            provided the pipeline must have IP-Adapter loaded via
+            ``pipe.load_ip_adapter()``.  Ignored when ``None``.
 
         Returns
         -------
@@ -180,13 +185,17 @@ class SDXLPipeline:
             kwargs["control_image"] = ctrl_img
             kwargs["controlnet_conditioning_scale"] = controlnet_conditioning_scale
 
+        if ip_adapter_image is not None:
+            kwargs["ip_adapter_image"] = ip_adapter_image
+
         logger.info(
-            "SDXL generate: steps=%d strength=%.2f cfg=%.1f seed=%s controlnet=%s",
+            "SDXL generate: steps=%d strength=%.2f cfg=%.1f seed=%s controlnet=%s ip_adapter=%s",
             steps,
             strength,
             cfg_scale,
             seed,
             self._controlnet is not None,
+            ip_adapter_image is not None,
         )
 
         result = self._pipe(**kwargs)

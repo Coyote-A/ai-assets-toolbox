@@ -193,10 +193,13 @@ class RunPodClient:
 
         Each element of tiles_data should contain:
             tile_id, image_b64, prompt_override (optional),
-            model, model_type, loras (list of {name, weight}),
+            model, loras (list of {name, weight}),
             controlnet_enabled, conditioning_scale,
             strength, steps, cfg_scale, seed,
-            global_prompt, negative_prompt
+            global_prompt, negative_prompt,
+            ip_adapter_enabled (bool, optional),
+            ip_adapter_image (base64 str, optional),
+            ip_adapter_scale (float, optional)
 
         Returns:
             list of {"tile_id": str, "image_b64": str, "seed_used": int}
@@ -211,8 +214,7 @@ class RunPodClient:
         loras: List[Dict[str, Any]] = first.get("loras", [])
 
         model_config: Dict[str, Any] = {
-            "base_model": first.get("model", "z-image-xl"),
-            "model_type": first.get("model_type", "sdxl"),
+            "base_model": first.get("model", "illustrious-xl"),
             "loras": loras,
             "controlnet": {
                 "enabled": first.get("controlnet_enabled", True),
@@ -237,16 +239,24 @@ class RunPodClient:
             for t in tiles_data
         ]
 
-        output = self.run_sync(
-            "upscale",
-            {
-                "model_config": model_config,
-                "generation_params": generation_params,
-                "global_prompt": first.get("global_prompt", ""),
-                "negative_prompt": first.get("negative_prompt", ""),
-                "tiles": tiles_payload,
-            },
-        )
+        request_body: Dict[str, Any] = {
+            "model_config": model_config,
+            "generation_params": generation_params,
+            "global_prompt": first.get("global_prompt", ""),
+            "negative_prompt": first.get("negative_prompt", ""),
+            "tiles": tiles_payload,
+        }
+
+        # Include IP-Adapter params when enabled
+        if first.get("ip_adapter_enabled"):
+            request_body["ip_adapter_enabled"] = True
+            request_body["ip_adapter_scale"] = first.get("ip_adapter_scale", 0.6)
+            if first.get("ip_adapter_image"):
+                request_body["ip_adapter_image"] = first["ip_adapter_image"]
+        else:
+            request_body["ip_adapter_enabled"] = False
+
+        output = self.run_sync("upscale", request_body)
         return output.get("tiles", [])
 
     def upscale_regions(
@@ -254,7 +264,6 @@ class RunPodClient:
         regions_data: List[Dict[str, Any]],
         original_image_b64: str,
         model: str,
-        model_type: str,
         loras: Optional[List[Dict[str, Any]]],
         global_prompt: str,
         negative_prompt: str,
@@ -264,6 +273,9 @@ class RunPodClient:
         seed: int,
         controlnet_enabled: bool,
         conditioning_scale: float,
+        ip_adapter_enabled: bool = False,
+        ip_adapter_image: Optional[str] = None,
+        ip_adapter_scale: float = 0.6,
     ) -> List[Dict[str, Any]]:
         """
         Send regions for upscaling through the diffusion img2img pipeline.
@@ -272,6 +284,7 @@ class RunPodClient:
             x, y, w, h, padding, prompt, negative_prompt
 
         loras: list of {"name": str, "weight": float} dicts (multi-LoRA support).
+        ip_adapter_image: base64-encoded style reference image (optional).
 
         Returns:
             list of {"region_id": str, "image_b64": str, "seed_used": int}
@@ -281,7 +294,6 @@ class RunPodClient:
 
         model_config: Dict[str, Any] = {
             "base_model": model,
-            "model_type": model_type,
             "loras": loras if loras else [],
             "controlnet": {
                 "enabled": controlnet_enabled,
@@ -311,17 +323,21 @@ class RunPodClient:
             for i, r in enumerate(regions_data)
         ]
 
-        output = self.run_sync(
-            "upscale_regions",
-            {
-                "model_config": model_config,
-                "generation_params": generation_params,
-                "global_prompt": global_prompt,
-                "negative_prompt": negative_prompt,
-                "regions": regions_payload,
-                "source_image_b64": original_image_b64,
-            },
-        )
+        request_body: Dict[str, Any] = {
+            "model_config": model_config,
+            "generation_params": generation_params,
+            "global_prompt": global_prompt,
+            "negative_prompt": negative_prompt,
+            "regions": regions_payload,
+            "source_image_b64": original_image_b64,
+            "ip_adapter_enabled": ip_adapter_enabled,
+        }
+
+        if ip_adapter_enabled and ip_adapter_image:
+            request_body["ip_adapter_image"] = ip_adapter_image
+            request_body["ip_adapter_scale"] = ip_adapter_scale
+
+        output = self.run_sync("upscale_regions", request_body)
         return output.get("regions", [])
 
     def list_models(self, model_type: str, base_model_filter: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -330,7 +346,7 @@ class RunPodClient:
 
         Args:
             model_type: "checkpoint", "lora", or "controlnet"
-            base_model_filter: optional filter, e.g. "sdxl" or "flux"
+            base_model_filter: optional filter, e.g. "sdxl"
 
         Returns:
             list of model dicts with keys: name, path, size_mb, base_model

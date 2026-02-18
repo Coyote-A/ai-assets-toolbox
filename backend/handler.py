@@ -105,4 +105,11 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
 
 if __name__ == "__main__":
     logger.info("Starting RunPod serverless handler")
+
+    # Preload primary diffusion model at worker startup for faster first request
+    logger.info("Preloading primary diffusion model...")
+    manager = ModelManager.get_instance()
+    manager.load_diffusion_model("illustrious-xl")
+    logger.info("Primary model preloaded, ready for jobs")
+
     runpod.serverless.start({"handler": handler})
