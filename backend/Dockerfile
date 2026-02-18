@@ -37,7 +37,7 @@ ENV TRANSFORMERS_CACHE=/app/hf_cache
 ENV DIFFUSERS_CACHE=/app/hf_cache
 
 # 1. Illustrious-XL (primary SDXL diffusion model) — precached
-RUN huggingface-cli download OnomaAIResearch/Illustrious-xl-early-release-v0 \
+RUN huggingface-cli download OnomaAIResearch/Illustrious-XL-v2.0 \
     --cache-dir /app/hf_cache \
     && echo "Illustrious-XL downloaded successfully"
 

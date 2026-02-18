@@ -45,7 +45,13 @@ CONTROLNETS_DIR = os.path.join(MODELS_ROOT, "controlnets")
 # Maps short model names → HuggingFace repo IDs
 # ---------------------------------------------------------------------------
 CHECKPOINT_MODELS: dict[str, str] = {
-    "illustrious-xl": "OnomaAIResearch/Illustrious-xl-early-release-v0",
+    "illustrious-xl": "OnomaAIResearch/Illustrious-XL-v2.0",
+}
+
+# Mapping from HF repo ID → known single-file safetensors filename in that repo.
+# Used to locate the cached file when loading with from_single_file().
+SINGLE_FILE_NAMES: dict[str, str] = {
+    "OnomaAIResearch/Illustrious-XL-v2.0": "Illustrious-XL-v2.0.safetensors",
 }
 
 CONTROLNET_MODELS: dict[str, str] = {
@@ -468,28 +474,135 @@ class ModelManager:
     # Model loading helpers
     # ------------------------------------------------------------------
 
+    def _resolve_single_file_path(self, repo_id: str) -> Optional[str]:
+        """
+        Locate a single-file safetensors checkpoint in the HF cache.
+
+        Checks (in order):
+        1. The baked-in Docker image HF cache (``HF_CACHE_DIR``).
+        2. The RunPod network-volume HF cache (``RUNPOD_CACHE_DIR``).
+
+        Returns the absolute path to the ``.safetensors`` file, or ``None`` if
+        not found in either cache location.
+        """
+        filename = SINGLE_FILE_NAMES.get(repo_id)
+        if filename is None:
+            return None
+
+        from huggingface_hub import try_to_load_from_cache
+
+        for cache_dir in (HF_CACHE_DIR, RUNPOD_CACHE_DIR):
+            try:
+                cached = try_to_load_from_cache(
+                    repo_id=repo_id,
+                    filename=filename,
+                    cache_dir=cache_dir,
+                )
+                if cached is not None and os.path.isfile(str(cached)):
+                    logger.debug(
+                        "Found single-file checkpoint '%s' in cache '%s': %s",
+                        filename,
+                        cache_dir,
+                        cached,
+                    )
+                    return str(cached)
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.debug(
+                    "try_to_load_from_cache failed for '%s' in '%s': %s",
+                    repo_id,
+                    cache_dir,
+                    exc,
+                )
+
+        logger.debug(
+            "Single-file checkpoint '%s' not found in any cache for repo '%s'",
+            filename,
+            repo_id,
+        )
+        return None
+
     def _load_sdxl(self, model_path: str) -> Any:
+        """
+        Load an SDXL img2img pipeline from *model_path*.
+
+        Supports three source formats:
+
+        1. **Local diffusers directory** (absolute path, contains
+           ``model_index.json``) — loaded with ``from_pretrained()``.
+        2. **Local single ``.safetensors`` file** (absolute path ending in
+           ``.safetensors``) — loaded with ``from_single_file()``.
+        3. **HF repo ID** — if the repo is listed in ``SINGLE_FILE_NAMES`` the
+           cached ``.safetensors`` file is located and loaded with
+           ``from_single_file()``; otherwise ``from_pretrained()`` is used with
+           the baked-in HF cache.
+        """
         from diffusers import StableDiffusionXLImg2ImgPipeline
 
-        # If model_path is an absolute local directory (network-volume override),
-        # load directly without cache_dir / local_files_only constraints.
-        # Otherwise use the precached HF cache with local_files_only=True.
-        is_local_dir = os.path.isabs(model_path) and os.path.isdir(model_path)
+        # ------------------------------------------------------------------
+        # Determine the effective file/directory path and loading strategy
+        # ------------------------------------------------------------------
 
-        kwargs: dict = {
-            "torch_dtype": torch.float16,
-            "use_safetensors": True,
-        }
-        if is_local_dir:
-            logger.info("Loading SDXL from local directory override: %s", model_path)
-        else:
-            kwargs["cache_dir"] = HF_CACHE_DIR
-            kwargs["local_files_only"] = True
+        # Case 1: absolute local path supplied directly
+        if os.path.isabs(model_path):
+            if model_path.endswith(".safetensors") and os.path.isfile(model_path):
+                logger.info(
+                    "Loading SDXL from local single-file checkpoint: %s", model_path
+                )
+                pipe = StableDiffusionXLImg2ImgPipeline.from_single_file(
+                    model_path,
+                    torch_dtype=torch.float16,
+                    use_safetensors=True,
+                )
+                pipe.enable_model_cpu_offload()
+                return pipe
 
-        pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(model_path, **kwargs)
-        # NOTE: enable_model_cpu_offload() manages device placement automatically.
-        # Do NOT call pipe.to("cuda") before it — that would defeat CPU offloading
-        # by moving all weights to VRAM upfront, preventing SDXL + ControlNet +
-        # IP-Adapter from sharing VRAM by offloading inactive components to CPU RAM.
+            if os.path.isdir(model_path):
+                logger.info(
+                    "Loading SDXL from local diffusers directory: %s", model_path
+                )
+                pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+                    model_path,
+                    torch_dtype=torch.float16,
+                    use_safetensors=True,
+                )
+                pipe.enable_model_cpu_offload()
+                return pipe
+
+            raise FileNotFoundError(
+                f"SDXL model path does not exist or is not a recognised format: {model_path}"
+            )
+
+        # Case 2: HF repo ID — try single-file cache first
+        single_file_path = self._resolve_single_file_path(model_path)
+        if single_file_path is not None:
+            logger.info(
+                "Loading SDXL from cached single-file checkpoint '%s': %s",
+                model_path,
+                single_file_path,
+            )
+            pipe = StableDiffusionXLImg2ImgPipeline.from_single_file(
+                single_file_path,
+                torch_dtype=torch.float16,
+                use_safetensors=True,
+            )
+            # NOTE: enable_model_cpu_offload() manages device placement automatically.
+            # Do NOT call pipe.to("cuda") before it — that would defeat CPU offloading
+            # by moving all weights to VRAM upfront, preventing SDXL + ControlNet +
+            # IP-Adapter from sharing VRAM by offloading inactive components to CPU RAM.
+            pipe.enable_model_cpu_offload()
+            return pipe
+
+        # Case 3: HF repo ID with diffusers multi-folder format (fallback)
+        logger.info(
+            "Loading SDXL from HF repo (diffusers format) with local cache: %s",
+            model_path,
+        )
+        pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+            model_path,
+            torch_dtype=torch.float16,
+            use_safetensors=True,
+            cache_dir=HF_CACHE_DIR,
+            local_files_only=True,
+        )
         pipe.enable_model_cpu_offload()
         return pipe

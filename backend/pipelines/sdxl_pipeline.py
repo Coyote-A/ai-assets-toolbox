@@ -5,9 +5,16 @@ Supports:
 - Plain img2img via ``StableDiffusionXLImg2ImgPipeline``
 - ControlNet tile conditioning via ``StableDiffusionXLControlNetImg2ImgPipeline``
 - LoRA adapters via ``pipe.load_lora_weights()`` / ``pipe.fuse_lora()``
+
+Loading strategy
+----------------
+When ``model_path`` ends with ``.safetensors`` (single-file checkpoint such as
+Illustrious-XL-v2.0) ``from_single_file()`` is used.  For diffusers multi-folder
+repos (containing ``model_index.json``) ``from_pretrained()`` is used instead.
 """
 
 import logging
+import os
 from typing import Optional
 
 import torch
@@ -19,6 +26,11 @@ logger = logging.getLogger(__name__)
 SDXL_TILE_CONTROLNET_ID = "xinsir/controlnet-tile-sdxl-1.0"
 
 
+def _is_single_file(model_path: str) -> bool:
+    """Return ``True`` when *model_path* points to a single ``.safetensors`` file."""
+    return model_path.endswith(".safetensors") and os.path.isfile(model_path)
+
+
 class SDXLPipeline:
     """
     Wrapper around the diffusers SDXL img2img pipeline.
@@ -26,7 +38,8 @@ class SDXLPipeline:
     Parameters
     ----------
     model_path:
-        HuggingFace repo ID or local directory path for the SDXL checkpoint.
+        HuggingFace repo ID, local diffusers directory, or absolute path to a
+        single ``.safetensors`` checkpoint file.
     controlnet_path:
         Optional HuggingFace repo ID or local path for a ControlNet model.
         When provided the pipeline is built with
@@ -60,12 +73,26 @@ class SDXLPipeline:
         from diffusers import StableDiffusionXLImg2ImgPipeline
 
         logger.info("Building plain SDXL img2img pipeline from '%s'", self.model_path)
-        self._pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
-            self.model_path,
-            torch_dtype=torch.float16,
-            use_safetensors=True,
-            variant="fp16",
-        ).to("cuda")
+
+        if _is_single_file(self.model_path):
+            # Single-file checkpoint (e.g. Illustrious-XL-v2.0.safetensors)
+            # from_single_file() does not accept cache_dir / local_files_only /
+            # variant — it loads directly from the given file path.
+            logger.info("Using from_single_file() for single-file checkpoint")
+            self._pipe = StableDiffusionXLImg2ImgPipeline.from_single_file(
+                self.model_path,
+                torch_dtype=torch.float16,
+                use_safetensors=True,
+            )
+        else:
+            # Diffusers multi-folder format
+            self._pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+                self.model_path,
+                torch_dtype=torch.float16,
+                use_safetensors=True,
+                variant="fp16",
+            )
+
         self._pipe.enable_model_cpu_offload()
         logger.info("SDXL plain pipeline ready")
 
@@ -84,13 +111,35 @@ class SDXLPipeline:
             self.controlnet_path,
             torch_dtype=torch.float16,
         )
-        self._pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
-            self.model_path,
-            controlnet=self._controlnet,
-            torch_dtype=torch.float16,
-            use_safetensors=True,
-            variant="fp16",
-        ).to("cuda")
+
+        if _is_single_file(self.model_path):
+            # Load the base pipeline from a single-file checkpoint first, then
+            # convert it to a ControlNet pipeline by injecting the ControlNet.
+            # StableDiffusionXLControlNetImg2ImgPipeline.from_single_file() is
+            # not universally available in all diffusers versions, so we build
+            # the plain pipeline and use from_pipe() to wrap it with ControlNet.
+            logger.info(
+                "Using from_single_file() + from_pipe() for single-file checkpoint"
+            )
+            base_pipe = StableDiffusionXLImg2ImgPipeline.from_single_file(
+                self.model_path,
+                torch_dtype=torch.float16,
+                use_safetensors=True,
+            )
+            self._pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pipe(
+                base_pipe,
+                controlnet=self._controlnet,
+            )
+        else:
+            # Diffusers multi-folder format
+            self._pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
+                self.model_path,
+                controlnet=self._controlnet,
+                torch_dtype=torch.float16,
+                use_safetensors=True,
+                variant="fp16",
+            )
+
         self._pipe.enable_model_cpu_offload()
         logger.info("SDXL+ControlNet pipeline ready")
 
