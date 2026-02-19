@@ -154,34 +154,87 @@ Or use the deploy scripts:
 
 ### Step 2: Create RunPod Serverless Endpoints
 
-#### Upscale Endpoint
+RunPod supports two methods for deploying serverless workers. Choose the one that fits your workflow:
+
+---
+
+#### Option A: Deploy via Docker Hub (Pre-built Images)
+
+Use this if you've already built and pushed images in Step 1.
+
+**Upscale Endpoint:**
 
 1. Go to [RunPod Console](https://www.runpod.io/console/serverless) → **Serverless** → **New Endpoint**
 2. **Endpoint Name**: `ai-assets-upscale`
 3. **Container Image**: `<your-dockerhub-username>/ai-assets-upscale:latest`
-4. **GPU**: Select **A100 80GB** (recommended) or **A40 48GB** (minimum)
+4. **Docker Command**: Leave default (the image uses `CMD ["/app/start.sh"]`)
+5. **GPU**: Select **A100 80GB** (recommended) or **A40 48GB** (minimum)
    - The upscale worker needs ~20-25 GB VRAM for SDXL + ControlNet + IP-Adapter
-5. **Min Workers**: `0` (scales to zero when idle — no cost)
-6. **Max Workers**: `1-3` (depending on your budget)
-7. **Idle Timeout**: `60` seconds (worker stays warm for 60s after last request)
-8. **Network Volume** (optional): Attach a network volume for persistent LoRA storage
+6. **Min Workers**: `0` (scales to zero when idle — no cost)
+7. **Max Workers**: `1-3` (depending on your budget)
+8. **Idle Timeout**: `60` seconds (worker stays warm for 60s after last request)
+9. **Network Volume** (optional): Attach a network volume for persistent LoRA storage
    - Mount path: `/runpod-volume`
    - This allows uploading/managing LoRA models that persist across worker restarts
-9. Click **Create Endpoint**
-10. Copy the **Endpoint ID** (e.g., `abc123def456`)
+10. Click **Create Endpoint**
+11. Copy the **Endpoint ID** (e.g., `abc123def456`)
 
-#### Caption Endpoint
+**Caption Endpoint:**
 
 1. **New Endpoint** → **Endpoint Name**: `ai-assets-caption`
 2. **Container Image**: `<your-dockerhub-username>/ai-assets-caption:latest`
-3. **GPU**: Select **RTX 4090** or **A40** (Qwen3-VL-2B needs only ~5 GB VRAM)
+3. **Docker Command**: Leave default (the image uses `CMD ["/app/start.sh"]`)
+4. **GPU**: Select **RTX 4090** or **A40** (Qwen3-VL-2B needs only ~5 GB VRAM)
    - This is a much lighter worker — cheaper GPU is fine
-4. **Min Workers**: `0`
-5. **Max Workers**: `1`
-6. **Idle Timeout**: `60` seconds
-7. **No network volume needed**
-8. Click **Create Endpoint**
-9. Copy the **Endpoint ID**
+5. **Min Workers**: `0`
+6. **Max Workers**: `1`
+7. **Idle Timeout**: `60` seconds
+8. **No network volume needed**
+9. Click **Create Endpoint**
+10. Copy the **Endpoint ID**
+
+---
+
+#### Option B: Deploy via GitHub Integration (Recommended)
+
+RunPod can build Docker images directly from your GitHub repository — no local Docker required.
+
+**Upscale Endpoint:**
+
+1. Go to [RunPod Console](https://www.runpod.io/console/serverless) → **Serverless** → **New Endpoint**
+2. Select **GitHub Repo** as the source
+3. Connect your GitHub account and select the `ai-assets-toolbox` repository
+4. **Dockerfile Path**: `workers/upscale/Dockerfile`
+5. **Build Context**: `workers/upscale`
+6. **Endpoint Name**: `ai-assets-upscale`
+7. **GPU**: Select **A100 80GB** (recommended) or **A40 48GB** (minimum)
+   - The upscale worker needs ~20-25 GB VRAM for SDXL + ControlNet + IP-Adapter
+8. **Min Workers**: `0` (scales to zero when idle — no cost)
+9. **Max Workers**: `1-3` (depending on your budget)
+10. **Idle Timeout**: `60` seconds
+11. **Network Volume** (optional): Attach a network volume for persistent LoRA storage
+    - Mount path: `/runpod-volume`
+    - This allows uploading/managing LoRA models that persist across worker restarts
+12. Click **Create Endpoint**
+13. Copy the **Endpoint ID** (e.g., `abc123def456`)
+
+**Caption Endpoint:**
+
+1. **New Endpoint** → Select **GitHub Repo** as the source
+2. Connect your GitHub account and select the `ai-assets-toolbox` repository
+3. **Dockerfile Path**: `workers/caption/Dockerfile`
+4. **Build Context**: `workers/caption`
+5. **Endpoint Name**: `ai-assets-caption`
+6. **GPU**: Select **RTX 4090** or **A40** (Qwen3-VL-2B needs only ~5 GB VRAM)
+   - This is a much lighter worker — cheaper GPU is fine
+7. **Min Workers**: `0`
+8. **Max Workers**: `1`
+9. **Idle Timeout**: `60` seconds
+10. **No network volume needed**
+11. Click **Create Endpoint**
+12. Copy the **Endpoint ID**
+
+---
 
 ### Step 3: Get Your API Key
 
