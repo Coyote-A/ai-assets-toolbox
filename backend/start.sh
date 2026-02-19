@@ -38,6 +38,25 @@ if command -v nvidia-smi &>/dev/null; then
     nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader || true
 fi
 
+# --- RunPod Model Cache Diagnostics ---
+echo "=== RunPod Model Cache Diagnostics ==="
+RUNPOD_CACHE="/runpod-volume/huggingface-cache/hub"
+if [ -d "$RUNPOD_CACHE" ]; then
+    echo "RunPod cache directory found at $RUNPOD_CACHE"
+    echo "Cached models:"
+    ls -d "$RUNPOD_CACHE"/models--* 2>/dev/null | while read dir; do
+        model_name=$(basename "$dir" | sed 's/models--//' | sed 's/--/\//g')
+        echo "  - $model_name"
+    done
+    if [ -z "$(ls -d "$RUNPOD_CACHE"/models--* 2>/dev/null)" ]; then
+        echo "  (none found)"
+    fi
+else
+    echo "RunPod cache directory not found at $RUNPOD_CACHE"
+    echo "Models will be loaded from baked-in Docker image cache or downloaded live."
+fi
+echo "======================================"
+
 # ---------------------------------------------------------------------------
 # Start the RunPod serverless handler
 # ---------------------------------------------------------------------------

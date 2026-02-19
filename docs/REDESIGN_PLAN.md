@@ -51,11 +51,11 @@ flowchart LR
 | [`model_manager.py`](../backend/model_manager.py) | Singleton `ModelManager` — dynamic load/unload of SDXL, Flux, Qwen, ControlNet, LoRA |
 | [`actions/upscale.py`](../backend/actions/upscale.py) | Tile-based upscale — loads model, iterates tiles, runs img2img |
 | [`actions/upscale_regions.py`](../backend/actions/upscale_regions.py) | Region-based upscale — extracts padded regions, runs img2img per region |
-| [`actions/caption.py`](../backend/actions/caption.py) | Qwen2.5-VL captioning — loads Qwen, generates per-tile captions |
+| [`actions/caption.py`](../backend/actions/caption.py) | Qwen3-VL captioning — loads Qwen, generates per-tile captions |
 | [`actions/models.py`](../backend/actions/models.py) | CRUD for models on network volume |
 | [`pipelines/sdxl_pipeline.py`](../backend/pipelines/sdxl_pipeline.py) | `SDXLPipeline` wrapper — plain or ControlNet img2img |
 | [`pipelines/flux_pipeline.py`](../backend/pipelines/flux_pipeline.py) | `FluxPipeline` wrapper — **TO BE REMOVED** |
-| [`pipelines/qwen_pipeline.py`](../backend/pipelines/qwen_pipeline.py) | `QwenPipeline` wrapper — Qwen2.5-VL-7B captioning |
+| [`pipelines/qwen_pipeline.py`](../backend/pipelines/qwen_pipeline.py) | `QwenPipeline` wrapper — Qwen3-VL-8B captioning |
 
 ### Current Models
 
@@ -67,7 +67,7 @@ flowchart LR
 | flux-dev | `black-forest-labs/FLUX.1-dev` | Flux checkpoint | **REMOVE** |
 | sdxl-tile | `xinsir/controlnet-tile-sdxl-1.0` | ControlNet | Keep |
 | flux-tile | `jasperai/Flux.1-dev-Controlnet-Upscaler` | ControlNet | **REMOVE** |
-| Qwen2.5-VL-7B | `Qwen/Qwen2.5-VL-7B-Instruct` | VLM | Keep |
+| Qwen3-VL-8B | `Qwen/Qwen3-VL-8B-Instruct` | VLM | Keep |
 
 ### Current UI Problems
 
@@ -188,7 +188,7 @@ grid_cols_state = gr.State(value=1)        # NEW: track grid column count for ga
 |-------|---------|-------------------|
 | Illustrious-XL | `OnomaAIResearch/Illustrious-xl-early-release-v0` | **`precached_model` in Dockerfile** — primary model, always loaded |
 | ControlNet Tile SDXL | `xinsir/controlnet-tile-sdxl-1.0` | Pre-download in Docker build |
-| Qwen2.5-VL-7B | `Qwen/Qwen2.5-VL-7B-Instruct` | Pre-download in Docker build |
+| Qwen3-VL-8B | `Qwen/Qwen3-VL-8B-Instruct` | Pre-download in Docker build |
 | IP-Adapter SDXL | `h94/IP-Adapter` subfolder `sdxl_models` | Pre-download in Docker build |
 | SDXL VAE | `madebyollin/sdxl-vae-fp16-fix` | Pre-download in Docker build |
 
@@ -625,16 +625,16 @@ cn = ControlNetModel.from_pretrained(
 print('ControlNet Tile SDXL downloaded successfully')
 "
 
-# 3. Qwen2.5-VL-7B
+# 3. Qwen3-VL-8B
 RUN python -c "
-from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
-model = Qwen2VLForConditionalGeneration.from_pretrained(
-    'Qwen/Qwen2.5-VL-7B-Instruct',
+from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+model = Qwen3VLForConditionalGeneration.from_pretrained(
+    'Qwen/Qwen3-VL-8B-Instruct',
     torch_dtype=torch.float16,
     device_map='cpu',
 )
-processor = AutoProcessor.from_pretrained('Qwen/Qwen2.5-VL-7B-Instruct')
-print('Qwen2.5-VL-7B downloaded successfully')
+processor = AutoProcessor.from_pretrained('Qwen/Qwen3-VL-8B-Instruct')
+print('Qwen3-VL-8B downloaded successfully')
 "
 
 # 4. IP-Adapter SDXL weights + CLIP image encoder
@@ -696,7 +696,7 @@ CMD ["/app/start.sh"]
 | Python + deps | ~3 GB |
 | Illustrious-XL fp16 | ~6.5 GB |
 | ControlNet Tile | ~1.5 GB |
-| Qwen2.5-VL-7B | ~14 GB |
+| Qwen3-VL-8B | ~14 GB |
 | IP-Adapter + CLIP | ~2 GB |
 | SDXL VAE | ~0.3 GB |
 | **Total** | **~32 GB** |

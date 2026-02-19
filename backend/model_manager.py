@@ -23,8 +23,13 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Precached HF cache path (baked into the Docker image at build time)
+# Resolution order: HF_HOME → HF_HUB_CACHE → fallback to /app/hf_cache
 # ---------------------------------------------------------------------------
-HF_CACHE_DIR = os.environ.get("HF_HOME", "/app/hf_cache")
+HF_CACHE_DIR = (
+    os.environ.get("HF_HOME")
+    or os.environ.get("HF_HUB_CACHE")
+    or "/app/hf_cache"
+)
 
 # ---------------------------------------------------------------------------
 # RunPod Cached Model directory (populated by RunPod's model caching feature)
@@ -58,7 +63,7 @@ CONTROLNET_MODELS: dict[str, str] = {
     "sdxl-tile": "xinsir/controlnet-tile-sdxl-1.0",
 }
 
-QWEN_MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
+QWEN_MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
 
 
 class ModelManager:
@@ -143,7 +148,7 @@ class ModelManager:
 
     def load_qwen(self) -> tuple[Any, Any]:
         """
-        Load Qwen2.5-VL-7B for captioning.
+        Load Qwen3-VL-8B for captioning.
 
         Returns ``(model, processor)`` tuple.  Unloads any currently loaded
         diffusion model first to free VRAM.
@@ -160,22 +165,22 @@ class ModelManager:
         # Unload diffusion model to free VRAM before loading Qwen (~15 GB)
         self.unload_current()
 
-        from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+        from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
 
         # --- 1. Try RunPod Cached Model path ---
         runpod_path = self._find_runpod_cached_model(QWEN_MODEL_ID)
         if runpod_path is not None:
             logger.info(
-                "Loading Qwen2.5-VL-7B from RunPod cache: %s", runpod_path
+                "Loading Qwen3-VL-8B from RunPod cache: %s", runpod_path
             )
-            self._qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
+            self._qwen_model = Qwen3VLForConditionalGeneration.from_pretrained(
                 runpod_path,
                 torch_dtype=torch.float16,
                 device_map="auto",
             )
             self._qwen_processor = AutoProcessor.from_pretrained(runpod_path)
             self._qwen_loaded = True
-            logger.info("Qwen2.5-VL-7B loaded successfully (source: RunPod cache)")
+            logger.info("Qwen3-VL-8B loaded successfully (source: RunPod cache)")
             return self._qwen_model, self._qwen_processor
 
         # --- 2. Try baked-in Docker image HF cache ---
@@ -183,7 +188,7 @@ class ModelManager:
             "RunPod cache not found; trying baked-in HF cache at '%s'", HF_CACHE_DIR
         )
         try:
-            self._qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
+            self._qwen_model = Qwen3VLForConditionalGeneration.from_pretrained(
                 QWEN_MODEL_ID,
                 torch_dtype=torch.float16,
                 device_map="auto",
@@ -196,7 +201,7 @@ class ModelManager:
                 local_files_only=True,
             )
             self._qwen_loaded = True
-            logger.info("Qwen2.5-VL-7B loaded successfully (source: baked-in HF cache)")
+            logger.info("Qwen3-VL-8B loaded successfully (source: baked-in HF cache)")
             return self._qwen_model, self._qwen_processor
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning(
@@ -204,15 +209,15 @@ class ModelManager:
             )
 
         # --- 3. Last resort: live HuggingFace download ---
-        logger.info("Downloading Qwen2.5-VL-7B from HuggingFace (last resort)")
-        self._qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
+        logger.info("Downloading Qwen3-VL-8B from HuggingFace (last resort)")
+        self._qwen_model = Qwen3VLForConditionalGeneration.from_pretrained(
             QWEN_MODEL_ID,
             torch_dtype=torch.float16,
             device_map="auto",
         )
         self._qwen_processor = AutoProcessor.from_pretrained(QWEN_MODEL_ID)
         self._qwen_loaded = True
-        logger.info("Qwen2.5-VL-7B loaded successfully (source: live HF download)")
+        logger.info("Qwen3-VL-8B loaded successfully (source: live HF download)")
         return self._qwen_model, self._qwen_processor
 
     def load_controlnet(self, model_name: str) -> Any:
@@ -232,14 +237,46 @@ class ModelManager:
 
         from diffusers import ControlNetModel
 
+        # --- 1. Try baked-in Docker image HF cache ---
+        try:
+            self._controlnet = ControlNetModel.from_pretrained(
+                hf_path,
+                torch_dtype=torch.float16,
+                cache_dir=HF_CACHE_DIR,
+                local_files_only=True,
+            )
+            self._controlnet_name = model_name
+            logger.info("ControlNet '%s' loaded successfully (source: baked-in HF cache)", model_name)
+            return self._controlnet
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(
+                "Baked-in HF cache miss for ControlNet '%s' — trying RunPod cache: %s",
+                model_name,
+                exc,
+            )
+
+        # --- 2. Try RunPod cache path ---
+        runpod_path = self._find_runpod_cached_model("xinsir/controlnet-tile-sdxl-1.0")
+        if runpod_path is not None:
+            logger.info(
+                "Loading ControlNet '%s' from RunPod cache: %s", model_name, runpod_path
+            )
+            self._controlnet = ControlNetModel.from_pretrained(
+                runpod_path,
+                torch_dtype=torch.float16,
+            )
+            self._controlnet_name = model_name
+            logger.info("ControlNet '%s' loaded successfully (source: RunPod cache)", model_name)
+            return self._controlnet
+
+        # --- 3. Last resort: live HuggingFace download ---
+        logger.info("Downloading ControlNet '%s' from HuggingFace (last resort)", model_name)
         self._controlnet = ControlNetModel.from_pretrained(
             hf_path,
             torch_dtype=torch.float16,
-            cache_dir=HF_CACHE_DIR,
-            local_files_only=True,
         )
         self._controlnet_name = model_name
-        logger.info("ControlNet '%s' loaded successfully", model_name)
+        logger.info("ControlNet '%s' loaded successfully (source: live HF download)", model_name)
         return self._controlnet
 
     def apply_lora(self, lora_name: str, weight: float = 1.0) -> None:
@@ -315,7 +352,7 @@ class ModelManager:
                 "ip_adapter_loaded": self._ip_adapter_loaded,
             }
         if self._qwen_loaded:
-            return {"type": "qwen", "name": "Qwen2.5-VL-7B"}
+            return {"type": "qwen", "name": "Qwen3-VL-8B"}
         return None
 
     def load_ip_adapter(self, scale: float = 0.6) -> None:
@@ -346,6 +383,8 @@ class ModelManager:
             "Loading IP-Adapter (sdxl_models/ip-adapter_sdxl_vit-h.safetensors) scale=%.2f",
             scale,
         )
+
+        # --- 1. Try baked-in Docker image HF cache ---
         try:
             self._diffusion_pipe.load_ip_adapter(
                 "h94/IP-Adapter",
@@ -356,7 +395,43 @@ class ModelManager:
             )
             self._diffusion_pipe.set_ip_adapter_scale(scale)
             self._ip_adapter_loaded = True
-            logger.info("IP-Adapter loaded successfully (scale=%.2f)", scale)
+            logger.info("IP-Adapter loaded successfully (source: baked-in HF cache, scale=%.2f)", scale)
+            return
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(
+                "Baked-in HF cache miss for IP-Adapter — trying RunPod cache: %s", exc
+            )
+
+        # --- 2. Try RunPod cache path ---
+        runpod_path = self._find_runpod_cached_model("h94/IP-Adapter")
+        if runpod_path is not None:
+            logger.info("Loading IP-Adapter from RunPod cache: %s", runpod_path)
+            try:
+                self._diffusion_pipe.load_ip_adapter(
+                    runpod_path,
+                    subfolder="sdxl_models",
+                    weight_name="ip-adapter_sdxl_vit-h.safetensors",
+                )
+                self._diffusion_pipe.set_ip_adapter_scale(scale)
+                self._ip_adapter_loaded = True
+                logger.info("IP-Adapter loaded successfully (source: RunPod cache, scale=%.2f)", scale)
+                return
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.warning(
+                    "Failed to load IP-Adapter from RunPod cache — trying live download: %s", exc
+                )
+
+        # --- 3. Last resort: live HuggingFace download ---
+        logger.info("Downloading IP-Adapter from HuggingFace (last resort)")
+        try:
+            self._diffusion_pipe.load_ip_adapter(
+                "h94/IP-Adapter",
+                subfolder="sdxl_models",
+                weight_name="ip-adapter_sdxl_vit-h.safetensors",
+            )
+            self._diffusion_pipe.set_ip_adapter_scale(scale)
+            self._ip_adapter_loaded = True
+            logger.info("IP-Adapter loaded successfully (source: live HF download, scale=%.2f)", scale)
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning(
                 "Failed to load IP-Adapter — continuing without it: %s", exc

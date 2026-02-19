@@ -1,7 +1,7 @@
 """
-Qwen2.5-VL captioning pipeline.
+Qwen3-VL captioning pipeline.
 
-Uses ``Qwen/Qwen2.5-VL-7B-Instruct`` to generate detailed image descriptions
+Uses ``Qwen/Qwen3-VL-8B-Instruct`` to generate detailed image descriptions
 suitable for use as Stable Diffusion prompts.
 """
 
@@ -13,7 +13,7 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-QWEN_MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
+QWEN_MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
 
 DEFAULT_SYSTEM_PROMPT = (
     "Describe this image tile in detail for use as a Stable Diffusion prompt. "
@@ -23,7 +23,7 @@ DEFAULT_SYSTEM_PROMPT = (
 
 class QwenPipeline:
     """
-    Wrapper around Qwen2.5-VL-7B-Instruct for image captioning.
+    Wrapper around Qwen3-VL-8B-Instruct for image captioning.
 
     The model is loaded in ``float16`` to reduce VRAM usage (~16–18 GB on
     an A100 80 GB).
@@ -32,7 +32,7 @@ class QwenPipeline:
     ----------
     model_id:
         HuggingFace repo ID or local path.  Defaults to
-        ``"Qwen/Qwen2.5-VL-7B-Instruct"``.
+        ``"Qwen/Qwen3-VL-8B-Instruct"``.
     cache_dir:
         Optional directory to cache downloaded model weights.
     """
@@ -54,11 +54,11 @@ class QwenPipeline:
     # ------------------------------------------------------------------
 
     def _load(self) -> None:
-        from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+        from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
 
-        logger.info("Loading Qwen2.5-VL-7B from '%s'", self.model_id)
+        logger.info("Loading Qwen3-VL-8B from '%s'", self.model_id)
 
-        self._model = Qwen2VLForConditionalGeneration.from_pretrained(
+        self._model = Qwen3VLForConditionalGeneration.from_pretrained(
             self.model_id,
             torch_dtype=torch.float16,
             device_map="auto",
@@ -68,7 +68,7 @@ class QwenPipeline:
             self.model_id,
             cache_dir=self.cache_dir,
         )
-        logger.info("Qwen2.5-VL-7B loaded successfully")
+        logger.info("Qwen3-VL-8B loaded successfully")
 
     # ------------------------------------------------------------------
     # Captioning
@@ -100,7 +100,7 @@ class QwenPipeline:
         if system_prompt is None:
             system_prompt = DEFAULT_SYSTEM_PROMPT
 
-        # Build the conversation messages in Qwen2-VL chat format
+        # Build the conversation messages in Qwen3-VL chat format
         messages = [
             {
                 "role": "user",

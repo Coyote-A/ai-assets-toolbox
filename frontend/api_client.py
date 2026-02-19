@@ -132,7 +132,7 @@ class RunPodClient:
         system_prompt: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         """
-        Send tiles for captioning via Qwen2.5-VL.
+        Send tiles for captioning via Qwen3-VL.
 
         Args:
             tiles_b64: list of {"tile_id": str, "image_b64": str}
@@ -157,7 +157,7 @@ class RunPodClient:
         system_prompt: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         """
-        Send region images for captioning via Qwen2.5-VL.
+        Send region images for captioning via Qwen3-VL.
 
         Args:
             regions_b64: list of {"region_id": str, "image_b64": str}

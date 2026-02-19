@@ -2,7 +2,7 @@
 Caption action handler.
 
 Accepts a list of image tiles (base64-encoded), runs each through the
-Qwen2.5-VL-7B captioning pipeline, and returns per-tile captions.
+Qwen3-VL-8B captioning pipeline, and returns per-tile captions.
 
 Request schema
 --------------

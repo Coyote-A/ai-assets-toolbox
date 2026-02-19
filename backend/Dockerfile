@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
     libgl1 libglib2.0-0 \
     && ln -sf /usr/bin/python3.11 /usr/bin/python \
     && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
-    && pip install --upgrade pip \
+    && python -m pip install --upgrade pip \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
@@ -23,8 +23,8 @@ WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
 
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir -r requirements.txt
 
 # ---------------------------------------------------------------------------
 # Pre-download models into the Docker image
@@ -35,9 +35,10 @@ RUN pip install --no-cache-dir --upgrade pip \
 ENV HF_HOME=/app/hf_cache
 ENV TRANSFORMERS_CACHE=/app/hf_cache
 ENV DIFFUSERS_CACHE=/app/hf_cache
+ENV HF_HUB_CACHE=/app/hf_cache
 
 # Ensure huggingface-cli is available for model downloads
-RUN pip install --no-cache-dir "huggingface_hub[cli]"
+RUN python -m pip install --no-cache-dir "huggingface_hub[cli]"
 
 # 1. Illustrious-XL (primary SDXL diffusion model) — precached
 RUN huggingface-cli download OnomaAIResearch/Illustrious-XL-v2.0 \
@@ -54,14 +55,9 @@ RUN huggingface-cli download madebyollin/sdxl-vae-fp16-fix \
     --cache-dir /app/hf_cache \
     && echo "SDXL VAE fp16-fix downloaded successfully"
 
-# 4. Qwen2.5-VL-7B-Instruct (captioning + image editing)
-# NOTE: Qwen2.5-VL-7B-Instruct (~15 GB) is NOT baked into this image.
-# Configure it as a RunPod Cached Model on the endpoint so RunPod pre-warms
-# it onto the network volume automatically.  The model_manager will find it
-# at the RunPod cache path (RUNPOD_MODEL_CACHE env var, default:
-# /runpod-volume/huggingface-cache/hub) and fall back to a live HF download
-# if the cache is absent.  Removing it here reduces the image from ~35 GB
-# to ~15-20 GB.
+# 4. Qwen3-VL-8B-Instruct is NOT baked in — it uses RunPod's managed model caching.
+# Set "Qwen/Qwen3-VL-8B-Instruct" as the Model in the RunPod endpoint configuration.
+# RunPod will pre-download it to /runpod-volume/huggingface-cache/hub on host NVMe (free, no billing).
 
 # 5. IP-Adapter SDXL weights + CLIP ViT-H image encoder (precached for Phase 4)
 RUN huggingface-cli download h94/IP-Adapter \
@@ -82,6 +78,7 @@ COPY . /app/
 ENV HF_HOME=/app/hf_cache
 ENV TRANSFORMERS_CACHE=/app/hf_cache
 ENV DIFFUSERS_CACHE=/app/hf_cache
+ENV HF_HUB_CACHE=/app/hf_cache
 
 # Network volume path (LoRAs, outputs, etc.)
 ENV RUNPOD_VOLUME_PATH=/runpod-volume

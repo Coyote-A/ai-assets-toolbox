@@ -8,7 +8,7 @@ A toolkit for AI-powered tile-based image upscaling, with a RunPod serverless ba
 
 - **Tile-based image upscaling (up to 8K)** — Slices large images into 1024×1024 tiles, processes each through a diffusion img2img pipeline, and reassembles them with automatic seam blending using linear gradient feathering.
 - **Illustrious-XL model** — Pre-cached in the Docker image for fast cold starts; no manual model download required.
-- **Auto-captioning tiles via Qwen2.5-VL-7B** — Each tile is automatically described by a vision-language model to generate accurate per-tile diffusion prompts.
+- **Auto-captioning tiles via Qwen3-VL-8B** — Each tile is automatically described by a vision-language model to generate accurate per-tile diffusion prompts.
 - **Per-tile prompt editing and global style prompts** — Review and edit auto-generated captions in the UI; prepend a global style prompt to all tiles.
 - **LoRA support** — Load multiple stacked LoRA adapters per job (SDXL-compatible).
 - **Tiled ControlNet for upscale quality** — Tile ControlNet preserves structural composition during diffusion, preventing hallucination at higher denoising strengths.
@@ -61,7 +61,7 @@ For full details see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
    - Select GPU: **A100 80GB SXM** (recommended)
    - Save and note the **Endpoint ID**
 
-   > **Note:** The Docker image pre-caches **Illustrious-XL**, **ControlNet Tile SDXL**, **Qwen2.5-VL-7B**, and the **SDXL VAE** during the build step. No manual model download is required for the base setup. LoRA adapters can be uploaded via the **LoRA Manager** tab in the UI.
+   > **Note:** The Docker image pre-caches **Illustrious-XL**, **ControlNet Tile SDXL**, **Qwen3-VL-8B**, and the **SDXL VAE** during the build step. No manual model download is required for the base setup. LoRA adapters can be uploaded via the **LoRA Manager** tab in the UI.
 
 ### Frontend Setup
 
@@ -108,7 +108,7 @@ ai-assets-toolbox/
 │   ├── start.sh                    # Container startup script
 │   ├── pipelines/
 │   │   ├── sdxl_pipeline.py        # SDXL img2img + ControlNet + IP-Adapter
-│   │   └── qwen_pipeline.py        # Qwen2.5-VL-7B captioning
+│   │   └── qwen_pipeline.py        # Qwen3-VL-8B captioning
 │   ├── actions/
 │   │   ├── upscale.py              # Tile upscale action handler
 │   │   ├── upscale_regions.py      # Region upscale action handler

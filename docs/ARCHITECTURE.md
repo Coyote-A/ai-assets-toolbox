@@ -62,7 +62,7 @@ flowchart LR
 | IP-Adapter (ViT-H SDXL) | fp16 | ~1.6 GB | Optional; loaded when IP-Adapter is enabled |
 | LoRA adapters (stacked) | fp16 | ~0.3 GB | Negligible; merged into base weights |
 | SDXL VAE (fp16-fix) | fp16 | ~0.3 GB | Pre-cached; replaces default VAE |
-| Qwen2.5-VL-7B (captioning) | fp16 | ~16–18 GB | Vision encoder + LLM decoder |
+| Qwen3-VL-8B (captioning) | fp16 | ~16–18 GB | Vision encoder + LLM decoder |
 
 ### Peak VRAM Scenarios (Dynamic Loading)
 
@@ -72,7 +72,7 @@ Only one diffusion model + one utility model loaded at a time:
 |----------|--------------|-----------|-----------------|
 | SDXL upscale (no IP-Adapter) | Illustrious-XL + ControlNet + LoRA + VAE | ~11 GB | ✅ Yes |
 | SDXL upscale (with IP-Adapter) | + IP-Adapter ViT-H | ~13 GB | ✅ Yes |
-| Tile captioning | Qwen2.5-VL-7B | ~18 GB | ✅ Yes |
+| Tile captioning | Qwen3-VL-8B | ~18 GB | ✅ Yes |
 | SDXL + captioning (sequential) | Swap between them | ~18 GB peak | ✅ Yes |
 
 ### GPU Tier Justification
@@ -98,7 +98,7 @@ The primary models are **pre-downloaded into the Docker image** during the build
 |-------|---------|-----------------|
 | Illustrious-XL | `OnomaAIResearch/Illustrious-xl-early-release-v0` | `snapshot_download` in Dockerfile |
 | ControlNet Tile SDXL | `xinsir/controlnet-tile-sdxl-1.0` | `snapshot_download` in Dockerfile |
-| Qwen2.5-VL-7B | `Qwen/Qwen2.5-VL-7B-Instruct` | `snapshot_download` in Dockerfile |
+| Qwen3-VL-8B | `Qwen/Qwen3-VL-8B-Instruct` | `snapshot_download` in Dockerfile |
 | IP-Adapter SDXL | `h94/IP-Adapter` (sdxl_models subfolder) | `snapshot_download` in Dockerfile |
 | SDXL VAE fp16-fix | `madebyollin/sdxl-vae-fp16-fix` | `snapshot_download` in Dockerfile |
 
@@ -154,7 +154,7 @@ All requests go through a single RunPod serverless handler. The `action` field i
 
 ### 4.1 Caption Tiles
 
-Generate captions for image tiles using Qwen2.5-VL-7B.
+Generate captions for image tiles using Qwen3-VL-8B.
 
 **Request:**
 ```json
@@ -367,7 +367,7 @@ flowchart TD
     A[User uploads image in Gradio] --> B[Client-side: Calculate tile grid]
     B --> C[Client-side: Slice image into tiles with overlap]
     C --> D[Send tiles to RunPod for captioning]
-    D --> E[Qwen2.5-VL generates per-tile captions]
+    D --> E[Qwen3-VL generates per-tile captions]
     E --> F[User reviews/edits captions in Gradio UI]
     F --> G[User configures model + generation params]
     G --> H[Send tiles + prompts to RunPod for upscaling]
@@ -394,7 +394,7 @@ Given input image dimensions and target resolution:
 
 ### Step 2: Auto-Captioning (Server-Side)
 
-- Each tile is sent to Qwen2.5-VL-7B with a system prompt tuned for SD prompt generation
+- Each tile is sent to Qwen3-VL-8B with a system prompt tuned for SD prompt generation
 - Captions describe visual content suitable for use as diffusion prompts
 - Batch processing: multiple tiles captioned in a single job to amortize model loading
 
@@ -464,7 +464,7 @@ ai-assets-toolbox/
 │   ├── pipelines/
 │   │   ├── __init__.py
 │   │   ├── sdxl_pipeline.py        # SDXL img2img + ControlNet + IP-Adapter
-│   │   └── qwen_pipeline.py        # Qwen2.5-VL-7B captioning
+│   │   └── qwen_pipeline.py        # Qwen3-VL-8B captioning
 │   ├── actions/
 │   │   ├── __init__.py
 │   │   ├── upscale.py              # Tile upscale action handler
@@ -497,7 +497,7 @@ ai-assets-toolbox/
 
 ## 7. Qwen Image Capabilities — Research Findings
 
-### Qwen2.5-VL (Vision-Language)
+### Qwen3-VL (Vision-Language)
 
 - **Type**: Vision-language understanding model
 - **Capabilities**: Image captioning, visual Q&A, OCR, object detection with bounding boxes
@@ -507,7 +507,7 @@ ai-assets-toolbox/
 ### Qwen-Image (20B)
 
 - **Type**: Diffusion-based image generation/editing foundation model
-- **Architecture**: Frozen Qwen2.5-VL encoder + hybrid VAE + diffusion transformer
+- **Architecture**: Frozen Qwen3-VL encoder + hybrid VAE + diffusion transformer
 - **Capabilities**:
   - Text-to-image generation
   - Image-to-image editing
@@ -528,7 +528,7 @@ ai-assets-toolbox/
 
 ### Recommendation
 
-**For v1, use Qwen2.5-VL-7B for captioning only.** The SDXL/Flux img2img pipeline with ControlNet provides sufficient tile refinement quality. Qwen-Image-Edit could be added as a future enhancement for semantic tile refinement, but at 40 GB fp16 it would require careful VRAM orchestration even on A100 80GB. A quantized Q4_K variant (~12 GB) is viable as a future addition.
+**For v1, use Qwen3-VL-8B for captioning only.** The SDXL/Flux img2img pipeline with ControlNet provides sufficient tile refinement quality. Qwen-Image-Edit could be added as a future enhancement for semantic tile refinement, but at 40 GB fp16 it would require careful VRAM orchestration even on A100 80GB. A quantized Q4_K variant (~12 GB) is viable as a future addition.
 
 ---
 
@@ -542,7 +542,7 @@ ai-assets-toolbox/
 | Serverless SDK | runpod | latest | Handler framework |
 | Diffusion | diffusers | 0.31+ | SDXL and Flux pipelines |
 | ML Framework | torch | 2.2+ | GPU inference |
-| Transformers | transformers | 4.45+ | Qwen2.5-VL model loading |
+| Transformers | transformers | 4.45+ | Qwen3-VL model loading |
 | Image Processing | Pillow | 10.0+ | Image manipulation |
 | ControlNet | diffusers (built-in) | — | ControlNet integration via diffusers |
 | Model Format | safetensors | 0.4+ | Safe model weight loading |
