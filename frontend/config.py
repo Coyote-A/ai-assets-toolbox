@@ -11,8 +11,27 @@ except ImportError:
     pass  # python-dotenv not installed; rely on actual env vars
 
 RUNPOD_API_KEY: str = os.getenv("RUNPOD_API_KEY", "")
-RUNPOD_ENDPOINT_ID: str = os.getenv("RUNPOD_ENDPOINT_ID", "")
-RUNPOD_BASE_URL: str = f"https://api.runpod.ai/v2/{RUNPOD_ENDPOINT_ID}"
+
+# Multi-endpoint IDs — each worker has its own RunPod serverless endpoint.
+# Backward compatibility: if the new vars are absent but the legacy
+# RUNPOD_ENDPOINT_ID is set, fall back to it for both workers.
+RUNPOD_UPSCALE_ENDPOINT_ID: str = os.getenv(
+    "RUNPOD_UPSCALE_ENDPOINT_ID",
+    os.getenv("RUNPOD_ENDPOINT_ID", ""),
+)
+RUNPOD_CAPTION_ENDPOINT_ID: str = os.getenv(
+    "RUNPOD_CAPTION_ENDPOINT_ID",
+    os.getenv("RUNPOD_ENDPOINT_ID", ""),
+)
+
+# RunPod public endpoint for Qwen-Image-Edit (used by the spritesheet tab).
+RUNPOD_IMAGE_EDIT_ENDPOINT: str = os.getenv(
+    "RUNPOD_IMAGE_EDIT_ENDPOINT",
+    "https://api.runpod.ai/v2/qwen-image-edit-2511-lora",
+)
+
+# Legacy alias kept for any code that still references RUNPOD_ENDPOINT_ID.
+RUNPOD_ENDPOINT_ID: str = os.getenv("RUNPOD_ENDPOINT_ID", RUNPOD_UPSCALE_ENDPOINT_ID)
 
 # Tile processing defaults
 TILE_SIZE: int = 1024

@@ -8,7 +8,7 @@
 4. [API Design](#4-api-design)
 5. [Tile Processing Pipeline](#5-tile-processing-pipeline)
 6. [Project Structure](#6-project-structure)
-7. [Qwen Image Capabilities](#7-qwen-image-capabilities)
+7. [Qwen Image Capabilities](#7-qwen-image-capabilities--research-findings)
 8. [Technology Stack](#8-technology-stack)
 9. [ControlNet Integration](#9-controlnet-integration)
 10. [IP-Adapter Style Transfer](#10-ip-adapter-style-transfer)
@@ -18,7 +18,7 @@
 
 ## 1. System Overview
 
-The system consists of two components: a **Gradio frontend** running locally on the user's machine, and a **RunPod serverless backend** running on a GPU-equipped worker.
+The system consists of three components: a **Gradio frontend** running locally on the user's machine, and two **RunPod serverless workers** running on GPU-equipped instances.
 
 ```mermaid
 flowchart LR
@@ -27,18 +27,26 @@ flowchart LR
     end
 
     subgraph RunPod Cloud
-        B[Serverless Handler]
-        C[Network Storage]
-        B <--> C
+        B[Upscale Worker]
+        C[Caption Worker]
+        D[Network Storage]
+        B <--> D
     end
 
     A -- HTTPS REST API --> B
+    A -- HTTPS REST API --> C
     B -- JSON + base64 images --> A
+    C -- JSON captions --> A
 ```
+
+### Workers
+
+- **Upscale Worker** — SDXL img2img with ControlNet Tile, IP-Adapter, and LoRA support. Also handles model management (list/upload/delete LoRAs on network storage).
+- **Caption Worker** — Qwen3-VL-8B vision-language model for auto-generating per-tile descriptions used as diffusion prompts.
 
 ### Communication Flow
 
-1. The Gradio frontend sends JSON requests to the RunPod serverless endpoint via HTTPS
+1. The Gradio frontend sends JSON requests to the appropriate RunPod endpoint via HTTPS
 2. Requests include an `action` field to route to the correct processing pipeline
 3. Images are transferred as **base64-encoded strings** within JSON payloads
 4. Large images (up to 8K) are compressed client-side before upload; tiles are processed server-side
@@ -48,12 +56,15 @@ flowchart LR
 
 - RunPod API key stored in a local `.env` file
 - All requests authenticated via `Authorization: Bearer <RUNPOD_API_KEY>` header
+- Two endpoint IDs: `RUNPOD_UPSCALE_ENDPOINT_ID` and `RUNPOD_CAPTION_ENDPOINT_ID`
 
 ---
 
 ## 2. VRAM Budget
 
 ### Target GPU: NVIDIA A100 80GB SXM
+
+#### Upscale Worker
 
 | Model | Precision | VRAM (Inference) | Notes |
 |-------|-----------|-----------------|-------|
@@ -62,18 +73,22 @@ flowchart LR
 | IP-Adapter (ViT-H SDXL) | fp16 | ~1.6 GB | Optional; loaded when IP-Adapter is enabled |
 | LoRA adapters (stacked) | fp16 | ~0.3 GB | Negligible; merged into base weights |
 | SDXL VAE (fp16-fix) | fp16 | ~0.3 GB | Pre-cached; replaces default VAE |
+
+#### Caption Worker
+
+| Model | Precision | VRAM (Inference) | Notes |
+|-------|-----------|-----------------|-------|
 | Qwen3-VL-8B (captioning) | fp16 | ~16–18 GB | Vision encoder + LLM decoder |
 
-### Peak VRAM Scenarios (Dynamic Loading)
+### Peak VRAM Scenarios
 
-Only one diffusion model + one utility model loaded at a time:
+| Scenario | Worker | Models Loaded | Peak VRAM | Fits A100 80GB? |
+|----------|--------|--------------|-----------|-----------------|
+| SDXL upscale (no IP-Adapter) | Upscale | Illustrious-XL + ControlNet + LoRA + VAE | ~11 GB | ✅ Yes |
+| SDXL upscale (with IP-Adapter) | Upscale | + IP-Adapter ViT-H | ~13 GB | ✅ Yes |
+| Tile captioning | Caption | Qwen3-VL-8B | ~18 GB | ✅ Yes |
 
-| Scenario | Models Loaded | Peak VRAM | Fits A100 80GB? |
-|----------|--------------|-----------|-----------------|
-| SDXL upscale (no IP-Adapter) | Illustrious-XL + ControlNet + LoRA + VAE | ~11 GB | ✅ Yes |
-| SDXL upscale (with IP-Adapter) | + IP-Adapter ViT-H | ~13 GB | ✅ Yes |
-| Tile captioning | Qwen3-VL-8B | ~18 GB | ✅ Yes |
-| SDXL + captioning (sequential) | Swap between them | ~18 GB peak | ✅ Yes |
+Since upscaling and captioning now run on separate workers, there is no need to swap models between tasks.
 
 ### GPU Tier Justification
 
@@ -92,38 +107,44 @@ Only one diffusion model + one utility model loaded at a time:
 
 ### Precaching Strategy
 
-The primary models are **pre-downloaded into the Docker image** during the build step, eliminating cold-start delays:
+The primary models are **pre-downloaded into the Docker image** during the build step, eliminating cold-start delays. Models are downloaded using `wget` directly from HuggingFace CDN URLs.
 
-| Model | HF Repo | Precache Method |
-|-------|---------|-----------------|
-| Illustrious-XL | `OnomaAIResearch/Illustrious-xl-early-release-v0` | `snapshot_download` in Dockerfile |
-| ControlNet Tile SDXL | `xinsir/controlnet-tile-sdxl-1.0` | `snapshot_download` in Dockerfile |
-| Qwen3-VL-8B | `Qwen/Qwen3-VL-8B-Instruct` | `snapshot_download` in Dockerfile |
-| IP-Adapter SDXL | `h94/IP-Adapter` (sdxl_models subfolder) | `snapshot_download` in Dockerfile |
-| SDXL VAE fp16-fix | `madebyollin/sdxl-vae-fp16-fix` | `snapshot_download` in Dockerfile |
+#### Upscale Worker
+
+| Model | Source | Precache Method |
+|-------|--------|-----------------|
+| Illustrious-XL | `OnomaAIResearch/Illustrious-xl-early-release-v0` | `wget` in Dockerfile |
+| ControlNet Tile SDXL | `xinsir/controlnet-tile-sdxl-1.0` | `wget` in Dockerfile |
+| IP-Adapter SDXL | `h94/IP-Adapter` (sdxl_models subfolder) | `wget` in Dockerfile |
+| SDXL VAE fp16-fix | `madebyollin/sdxl-vae-fp16-fix` | `wget` in Dockerfile |
+
+#### Caption Worker
+
+| Model | Source | Precache Method |
+|-------|--------|-----------------|
+| Qwen3-VL-8B | `Qwen/Qwen3-VL-8B-Instruct` | `wget` in Dockerfile |
 
 LoRA adapters remain on the **RunPod Network Volume** and are loaded dynamically at runtime.
 
-### Dynamic Loading Strategy
+### Dynamic Loading Strategy (Upscale Worker)
 
-Models are loaded on-demand and unloaded when switching tasks. The handler maintains a `ModelManager` singleton:
+The upscale worker handler maintains a `ModelManager` singleton that manages SDXL pipeline state:
 
 ```mermaid
 stateDiagram-v2
     [*] --> Idle
-    Idle --> LoadingSDXL: action=upscale
-    Idle --> LoadingQwen: action=caption
+    Idle --> LoadingSDXL: action=upscale / upscale_regions
     LoadingSDXL --> SDXLReady: model loaded
-    LoadingQwen --> QwenReady: model loaded
     SDXLReady --> Idle: unload after job
-    QwenReady --> Idle: unload after job
 ```
 
-### Model Manager Behavior
+The caption worker loads Qwen3-VL-8B once at startup and keeps it resident for the lifetime of the worker.
+
+### Model Manager Behavior (Upscale Worker)
 
 1. **Check if requested model is already loaded** — skip loading if so
 2. **Unload current model** — call `del model; torch.cuda.empty_cache(); gc.collect()`
-3. **Load requested model** from the pre-cached HuggingFace cache path
+3. **Load requested model** from the pre-cached path
 4. **Cache strategy**: Keep the most recently used model in VRAM; unload only when a different model is needed
 5. **IP-Adapter**: Loaded on-demand alongside the SDXL pipeline when `ip_adapter_enabled=True`
 
@@ -150,7 +171,10 @@ stateDiagram-v2
 
 ## 4. API Design
 
-All requests go through a single RunPod serverless handler. The `action` field in the input determines the operation.
+Requests are routed to the appropriate RunPod serverless worker based on the operation type. The `action` field in the input determines the operation within each worker.
+
+- **Caption Worker** handles: `caption`
+- **Upscale Worker** handles: `upscale`, `upscale_regions`, `list_models`, `upload_model`, `delete_model`, `health`
 
 ### 4.1 Caption Tiles
 
@@ -450,47 +474,53 @@ ai-assets-toolbox/
 ├── README.md
 ├── LICENSE
 ├── .gitignore
-├── .env.example                    # Template for environment variables
+├── .env.example                        # Template for environment variables
 ├── docs/
-│   ├── ARCHITECTURE.md             # This document
-│   └── REDESIGN_PLAN.md            # Design decisions and implementation notes
+│   ├── ARCHITECTURE.md                 # This document
+│   └── REDESIGN_PLAN.md                # Design decisions and implementation notes
 │
-├── backend/                        # RunPod serverless worker
-│   ├── Dockerfile                  # Container build — pre-caches all primary models
-│   ├── requirements.txt            # Python dependencies
-│   ├── handler.py                  # RunPod handler entry point
-│   ├── model_manager.py            # Dynamic model loading/unloading + IP-Adapter
-│   ├── start.sh                    # Container startup script
-│   ├── pipelines/
-│   │   ├── __init__.py
-│   │   ├── sdxl_pipeline.py        # SDXL img2img + ControlNet + IP-Adapter
-│   │   └── qwen_pipeline.py        # Qwen3-VL-8B captioning
-│   ├── actions/
-│   │   ├── __init__.py
-│   │   ├── upscale.py              # Tile upscale action handler
-│   │   ├── upscale_regions.py      # Region upscale action handler
-│   │   ├── caption.py              # Caption action handler
-│   │   └── models.py               # List/upload/delete LoRA actions
-│   └── utils/
-│       ├── __init__.py
-│       ├── image_utils.py          # Base64 encode/decode, image transforms
-│       └── storage.py              # Network volume file operations
+├── workers/
+│   ├── upscale/                        # Upscale RunPod serverless worker
+│   │   ├── Dockerfile                  # Container build — pre-caches Illustrious-XL + aux models via wget
+│   │   ├── requirements.txt            # Python dependencies
+│   │   ├── handler.py                  # RunPod handler entry point
+│   │   ├── model_manager.py            # Dynamic model loading/unloading + IP-Adapter
+│   │   ├── start.sh                    # Container startup script
+│   │   ├── pipelines/
+│   │   │   ├── __init__.py
+│   │   │   └── sdxl_pipeline.py        # SDXL img2img + ControlNet + IP-Adapter
+│   │   ├── actions/
+│   │   │   ├── __init__.py
+│   │   │   ├── upscale.py              # Tile upscale action handler
+│   │   │   ├── upscale_regions.py      # Region upscale action handler
+│   │   │   └── models.py               # List/upload/delete LoRA actions
+│   │   └── utils/
+│   │       ├── __init__.py
+│   │       ├── image_utils.py          # Base64 encode/decode, image transforms
+│   │       └── storage.py              # Network volume file operations
+│   │
+│   └── caption/                        # Caption RunPod serverless worker
+│       ├── Dockerfile                  # Container build — pre-caches Qwen3-VL-8B via wget
+│       ├── requirements.txt            # Python dependencies
+│       ├── handler.py                  # RunPod handler entry point
+│       ├── qwen_pipeline.py            # Qwen3-VL-8B captioning pipeline
+│       └── start.sh                    # Container startup script
 │
-├── frontend/                       # Gradio application
-│   ├── requirements.txt            # Python dependencies
-│   ├── app.py                      # Gradio app entry point + CSS theme
-│   ├── api_client.py               # RunPod API client wrapper
-│   ├── config.py                   # Configuration loader (env vars, tile defaults)
-│   ├── tiling.py                   # Tile slicing, grid calculation, seam blending, offset pass
+├── frontend/                           # Gradio application
+│   ├── requirements.txt                # Python dependencies
+│   ├── app.py                          # Gradio app entry point + CSS theme
+│   ├── api_client.py                   # RunPod API client (multi-endpoint)
+│   ├── config.py                       # Configuration loader (env vars, tile defaults)
+│   ├── tiling.py                       # Tile slicing, grid calculation, seam blending, offset pass
 │   └── tabs/
 │       ├── __init__.py
-│       ├── upscale_tab.py          # Tab 1: Tile-based upscaling UI (main workflow)
-│       ├── spritesheet_tab.py      # Tab 2: Spritesheet animation (coming soon)
-│       └── model_manager_tab.py    # Tab 3: LoRA Manager
+│       ├── upscale_tab.py              # Tab 1: Tile-based upscaling UI (custom HTML/JS tile grid)
+│       ├── spritesheet_tab.py          # Tab 2: Spritesheet animation (coming soon)
+│       └── model_manager_tab.py        # Tab 3: LoRA Manager
 │
 └── scripts/
-    ├── deploy.sh                   # Deploy backend to RunPod (Linux/macOS)
-    └── deploy.ps1                  # Deploy backend to RunPod (Windows)
+    ├── deploy.sh                       # Deploy workers to RunPod (Linux/macOS)
+    └── deploy.ps1                      # Deploy workers to RunPod (Windows)
 ```
 
 ---
@@ -526,28 +556,43 @@ ai-assets-toolbox/
 - **VRAM**: ~40 GB in fp16; ~12 GB quantized (Q4_K)
 - **Relevance**: Strong candidate for tile refinement if quality improvements justify the VRAM cost
 
-### Recommendation
+### Current Architecture
 
-**For v1, use Qwen3-VL-8B for captioning only.** The SDXL/Flux img2img pipeline with ControlNet provides sufficient tile refinement quality. Qwen-Image-Edit could be added as a future enhancement for semantic tile refinement, but at 40 GB fp16 it would require careful VRAM orchestration even on A100 80GB. A quantized Q4_K variant (~12 GB) is viable as a future addition.
+**Qwen3-VL-8B runs on the dedicated caption worker** for auto-captioning tiles. The SDXL img2img pipeline with ControlNet on the upscale worker provides tile refinement quality. The two workers are fully independent and communicate only through the frontend.
+
+### Future: Qwen-Image-Edit
+
+Qwen-Image-Edit is planned as a **RunPod public endpoint** for the spritesheet animation tab. At 40 GB fp16 it would require its own dedicated worker. A quantized Q4_K variant (~12 GB) is viable as a future addition for semantic tile refinement.
 
 ---
 
 ## 8. Technology Stack
 
-### Backend (RunPod Worker)
+### Upscale Worker (RunPod)
 
 | Component | Library | Version | Purpose |
 |-----------|---------|---------|---------|
 | Runtime | Python | 3.10+ | Base runtime |
 | Serverless SDK | runpod | latest | Handler framework |
-| Diffusion | diffusers | 0.31+ | SDXL and Flux pipelines |
+| Diffusion | diffusers | 0.31+ | SDXL img2img + ControlNet pipelines |
 | ML Framework | torch | 2.2+ | GPU inference |
-| Transformers | transformers | 4.45+ | Qwen3-VL model loading |
 | Image Processing | Pillow | 10.0+ | Image manipulation |
 | ControlNet | diffusers (built-in) | — | ControlNet integration via diffusers |
 | Model Format | safetensors | 0.4+ | Safe model weight loading |
 | Acceleration | accelerate | 0.30+ | Model loading optimization |
 | PEFT | peft | 0.12+ | LoRA adapter loading |
+| Container | Docker | — | RunPod deployment |
+| Base Image | runpod/pytorch:2.2-py3.10-cuda12.1 | — | CUDA-enabled base |
+
+### Caption Worker (RunPod)
+
+| Component | Library | Version | Purpose |
+|-----------|---------|---------|---------|
+| Runtime | Python | 3.10+ | Base runtime |
+| Serverless SDK | runpod | latest | Handler framework |
+| ML Framework | torch | 2.2+ | GPU inference |
+| Transformers | transformers | 4.45+ | Qwen3-VL model loading |
+| Image Processing | Pillow | 10.0+ | Image manipulation |
 | Container | Docker | — | RunPod deployment |
 | Base Image | runpod/pytorch:2.2-py3.10-cuda12.1 | — | CUDA-enabled base |
 

@@ -13,8 +13,10 @@ Usage
     python app.py
 
 Environment variables (or .env file):
-    RUNPOD_API_KEY      — RunPod API key
-    RUNPOD_ENDPOINT_ID  — RunPod serverless endpoint ID
+    RUNPOD_API_KEY              — RunPod API key
+    RUNPOD_UPSCALE_ENDPOINT_ID  — RunPod upscale worker endpoint ID
+    RUNPOD_CAPTION_ENDPOINT_ID  — RunPod caption worker endpoint ID
+    RUNPOD_ENDPOINT_ID          — Legacy single-endpoint fallback (optional)
 """
 import sys
 import os
@@ -32,6 +34,13 @@ from api_client import RunPodClient
 from tabs.upscale_tab import create_upscale_tab
 from tabs.spritesheet_tab import create_spritesheet_tab
 from tabs.model_manager_tab import create_model_manager_tab
+
+# Re-export new config names for convenience
+from config import (  # noqa: F401
+    RUNPOD_API_KEY,
+    RUNPOD_UPSCALE_ENDPOINT_ID,
+    RUNPOD_CAPTION_ENDPOINT_ID,
+)
 
 _CSS = """
 /* ── Layout ─────────────────────────────────────────────────────────────── */
@@ -58,20 +67,76 @@ footer { display: none !important; }
     color: #ffb060;
 }
 
-/* ── Tile grid gallery ───────────────────────────────────────────────────── */
-.tile-grid-gallery .thumbnail-item {
+/* ── Tile grid (HTML/CSS/JS component) ───────────────────────────────────── */
+#tile-grid-container {
+    width: 100%;
+}
+.tile-grid {
+    display: grid;
+    gap: 2px;
+    width: 100%;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #1a1b2e;
+}
+.tile-grid .tile {
+    position: relative;
+    aspect-ratio: 1 / 1;
+    background-repeat: no-repeat;
     border: 2px solid transparent;
     border-radius: 4px;
-    transition: border-color 0.15s ease;
-}
-.tile-grid-gallery .thumbnail-item:hover {
-    border-color: #4a80ff;
     cursor: pointer;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    overflow: hidden;
 }
-.tile-grid-gallery .thumbnail-item.selected {
+.tile-grid .tile[data-status=default] { border-color: #333; }
+.tile-grid .tile.selected {
     border-color: #1e6fff;
-    box-shadow: 0 0 0 2px #1e6fff55;
+    box-shadow: 0 0 0 2px rgba(30, 111, 255, 0.35);
+    z-index: 1;
 }
+.tile-grid .tile[data-status=processed] { border-color: #00c853; }
+.tile-grid .tile[data-status=processed]::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 200, 80, 0.08);
+    pointer-events: none;
+}
+.tile-grid .tile[data-status=processing] {
+    border-color: #ffa726;
+    animation: tile-pulse 1.2s ease-in-out infinite;
+}
+@keyframes tile-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255, 167, 38, 0.4); }
+    50%       { box-shadow: 0 0 0 6px rgba(255, 167, 38, 0); }
+}
+.tile-grid .tile:hover { border-color: #4a80ff; }
+.tile-grid .tile-label {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    background: rgba(0, 0, 0, 0.7);
+    color: #fff;
+    font-size: 11px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    pointer-events: none;
+    font-family: monospace;
+}
+.tile-grid .tile-status-icon {
+    position: absolute;
+    bottom: 3px;
+    right: 3px;
+    font-size: 14px;
+    pointer-events: none;
+}
+.tile-grid .tile[data-status=processed] .tile-status-icon::after {
+    content: '✓';
+    color: #00c853;
+    text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
+}
+.tile-grid .tile[data-status=processing] .tile-status-icon::after { content: '⏳'; }
 
 /* ── Selected tile detail panel ──────────────────────────────────────────── */
 .selected-tile-panel {
@@ -113,7 +178,8 @@ footer { display: none !important; }
 /* ── Responsive: narrow screens ─────────────────────────────────────────── */
 @media (max-width: 900px) {
     .gradio-container { max-width: 100%; padding: 0 8px; }
-    .tile-grid-gallery { height: auto !important; }
+    .tile-grid { gap: 1px; }
+    .tile-grid .tile-label { font-size: 9px; }
 }
 """
 
@@ -123,7 +189,8 @@ def build_app() -> gr.Blocks:
 
     client = RunPodClient(
         api_key=config.RUNPOD_API_KEY,
-        endpoint_id=config.RUNPOD_ENDPOINT_ID,
+        upscale_endpoint_id=config.RUNPOD_UPSCALE_ENDPOINT_ID,
+        caption_endpoint_id=config.RUNPOD_CAPTION_ENDPOINT_ID,
     )
 
     with gr.Blocks(
@@ -140,11 +207,11 @@ def build_app() -> gr.Blocks:
         )
 
         # Warn if credentials are missing
-        if not config.RUNPOD_API_KEY or not config.RUNPOD_ENDPOINT_ID:
+        if not config.RUNPOD_API_KEY or not config.RUNPOD_UPSCALE_ENDPOINT_ID:
             gr.Markdown(
                 "⚠️ **Configuration missing** — set `RUNPOD_API_KEY` and "
-                "`RUNPOD_ENDPOINT_ID` in your `.env` file or environment before "
-                "making API calls.",
+                "`RUNPOD_UPSCALE_ENDPOINT_ID` (and optionally `RUNPOD_CAPTION_ENDPOINT_ID`) "
+                "in your `.env` file or environment before making API calls.",
                 elem_id="config-warning",
             )
 

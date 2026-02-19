@@ -5,16 +5,17 @@ Layout
 ------
 Full-width image upload at the top.
 Two-column layout below:
-  Left column  (~65%): Unified tile grid gallery + selected tile detail + action buttons
+  Left column  (~65%): Unified tile grid (HTML/CSS/JS) + selected tile detail + action buttons
   Right column (~35%): Settings organized in collapsible accordions
 
 State
 -----
-tiles_state        : list[dict]  — per-tile data (info, prompt, processed image)
-selected_idx_state : int         — currently selected tile index (-1 = none)
-original_img_state : PIL.Image   — the uploaded (and upscaled) image
-grid_cols_state    : int         — number of columns in the tile grid (for gallery layout)
-loras_state        : list[dict]  — active LoRAs [{name, weight}, ...]
+tiles_state          : list[dict]  — per-tile data (info, prompt, processed image)
+selected_idx_state   : int         — currently selected tile index (-1 = none)
+original_img_state   : PIL.Image   — the uploaded (and upscaled) image
+grid_cols_state      : int         — number of columns in the tile grid
+loras_state          : list[dict]  — active LoRAs [{name, weight}, ...]
+full_image_b64_state : str         — base64 JPEG of the full upscaled image for grid display
 """
 from __future__ import annotations
 
@@ -28,7 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import gradio as gr
-from PIL import Image, ImageDraw
+from PIL import Image
 
 import config
 from api_client import RunPodClient, RunPodError
@@ -104,87 +105,236 @@ def _compute_target_size(
 
 
 # ---------------------------------------------------------------------------
-# Tile thumbnail generation (annotated gallery images)
+# Grid image encoder
 # ---------------------------------------------------------------------------
 
-_THUMB_SIZE = 256  # thumbnail size for gallery display
+def _encode_grid_image(img: Image.Image, max_side: int = 2048, quality: int = 75) -> str:
+    """Encode a PIL image as a JPEG base64 string for use in the tile grid.
 
-
-def _make_tile_thumbnail(
-    tile_img: Image.Image,
-    label: str,
-    is_selected: bool = False,
-    is_processed: bool = False,
-) -> Image.Image:
+    Optionally downscales to max_side on the longest dimension to keep the
+    payload small while still providing enough resolution for thumbnail display.
     """
-    Generate an annotated thumbnail for the tile gallery.
-
-    - Processed tiles get a green border/tint overlay.
-    - Selected tile gets a blue border.
-    - Label (e.g. "0,0" or "0,0 ✓") is drawn in the corner.
-    """
-    thumb = tile_img.convert("RGB").copy()
-    thumb.thumbnail((_THUMB_SIZE, _THUMB_SIZE), Image.LANCZOS)
-
-    # Pad to square so gallery looks uniform
-    sq = Image.new("RGB", (_THUMB_SIZE, _THUMB_SIZE), (30, 30, 30))
-    offset_x = (_THUMB_SIZE - thumb.width) // 2
-    offset_y = (_THUMB_SIZE - thumb.height) // 2
-    sq.paste(thumb, (offset_x, offset_y))
-
-    draw = ImageDraw.Draw(sq, "RGBA")
-
-    # Green tint overlay for processed tiles
-    if is_processed:
-        draw.rectangle([0, 0, _THUMB_SIZE - 1, _THUMB_SIZE - 1], fill=(0, 200, 80, 40))
-
-    # Border colour: blue for selected, green for processed, grey otherwise
-    if is_selected:
-        border_color = (30, 120, 255, 255)
-        border_width = 4
-    elif is_processed:
-        border_color = (0, 200, 80, 255)
-        border_width = 3
-    else:
-        border_color = (80, 80, 80, 200)
-        border_width = 1
-
-    for i in range(border_width):
-        draw.rectangle(
-            [i, i, _THUMB_SIZE - 1 - i, _THUMB_SIZE - 1 - i],
-            outline=border_color,
+    display_img = img.convert("RGB")
+    w, h = display_img.size
+    if max(w, h) > max_side:
+        scale = max_side / max(w, h)
+        display_img = display_img.resize(
+            (int(w * scale), int(h * scale)), Image.LANCZOS
         )
-
-    # Label badge in top-left corner
-    badge_text = label
-    badge_w = len(badge_text) * 7 + 8
-    badge_h = 18
-    draw.rectangle([2, 2, 2 + badge_w, 2 + badge_h], fill=(0, 0, 0, 180))
-    draw.text((6, 4), badge_text, fill=(255, 255, 255, 255))
-
-    return sq
+    buf = io.BytesIO()
+    display_img.save(buf, format="JPEG", quality=quality)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def _build_gallery_items(
-    tiles_state: List[Dict],
+# ---------------------------------------------------------------------------
+# HTML tile grid builder
+# ---------------------------------------------------------------------------
+
+_TILE_GRID_CSS = """
+<style>
+.tile-grid {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #1a1b2e;
+}
+.tile {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  background-repeat: no-repeat;
+  border: 2px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  overflow: hidden;
+}
+.tile[data-status=default] { border-color: #333; }
+.tile.selected {
+  border-color: #1e6fff;
+  box-shadow: 0 0 0 2px rgba(30, 111, 255, 0.35);
+  z-index: 1;
+}
+.tile[data-status=processed] { border-color: #00c853; }
+.tile[data-status=processed]::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 200, 80, 0.08);
+  pointer-events: none;
+}
+.tile[data-status=processing] {
+  border-color: #ffa726;
+  animation: tile-pulse 1.2s ease-in-out infinite;
+}
+@keyframes tile-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 167, 38, 0.4); }
+  50%       { box-shadow: 0 0 0 6px rgba(255, 167, 38, 0); }
+}
+.tile:hover { border-color: #4a80ff; }
+.tile-label {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  pointer-events: none;
+  font-family: monospace;
+}
+.tile-status-icon {
+  position: absolute;
+  bottom: 3px;
+  right: 3px;
+  font-size: 14px;
+  pointer-events: none;
+}
+.tile[data-status=processed] .tile-status-icon::after {
+  content: '\u2713';
+  color: #00c853;
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
+}
+.tile[data-status=processing] .tile-status-icon::after { content: '\u23f3'; }
+@media (max-width: 900px) {
+  .tile-grid { gap: 1px; }
+  .tile-label { font-size: 9px; }
+}
+</style>
+"""
+
+_TILE_GRID_JS = """
+<script>
+(function() {
+  var root = document.getElementById('tile-grid-root');
+  if (!root) return;
+
+  var tiles = root.querySelectorAll('.tile');
+  var selectedIdx = parseInt(root.dataset.selected, 10);
+
+  // Apply selected class from server-side state
+  tiles.forEach(function(tile) {
+    tile.classList.toggle('selected', parseInt(tile.dataset.idx, 10) === selectedIdx);
+  });
+
+  // Click handler — write to hidden textbox to notify Python
+  root.addEventListener('click', function(e) {
+    var tileEl = e.target.closest('.tile');
+    if (!tileEl) return;
+
+    var idx = parseInt(tileEl.dataset.idx, 10);
+
+    // Update visual selection immediately (no round-trip needed)
+    tiles.forEach(function(t) { t.classList.remove('selected'); });
+    tileEl.classList.add('selected');
+
+    // Write to hidden Gradio textbox to trigger Python .change() handler
+    var hiddenInput = document.querySelector('#tile-selected-idx textarea');
+    if (hiddenInput) {
+      var nativeInputValueSetter =
+        Object.getOwnPropertyDescriptor(
+          window.HTMLTextAreaElement.prototype, 'value'
+        ).set;
+      nativeInputValueSetter.call(hiddenInput, String(idx));
+      hiddenInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  });
+})();
+</script>
+"""
+
+
+def _build_tile_grid_html(
+    tiles_data: List[Dict],
+    full_image_b64: str,
     selected_idx: int,
-) -> List[Tuple[Image.Image, str]]:
-    """Build the list of (annotated_image, caption) tuples for gr.Gallery."""
-    items = []
-    for i, tile in enumerate(tiles_state):
+    img_w: int,
+    img_h: int,
+) -> str:
+    """Build the HTML/CSS/JS string for the custom tile grid component.
+
+    Args:
+        tiles_data: List of tile dicts with 'info' (TileInfo), 'processed_b64' (optional).
+                    The TileInfo coords must already be in display-image space.
+        full_image_b64: Base64 JPEG of the full (possibly downscaled) image for display
+        selected_idx: Currently selected tile index (-1 for none)
+        img_w: Full display image width in pixels
+        img_h: Full display image height in pixels
+
+    Returns:
+        HTML string with embedded CSS and JS
+    """
+    if not tiles_data:
+        return "<p style='color:#888; padding:16px;'>Upload an image to see the tile grid.</p>"
+
+    # Determine grid dimensions from tile infos
+    grid_cols = max(t["info"].col for t in tiles_data) + 1
+    grid_rows = max(t["info"].row for t in tiles_data) + 1
+
+    tile_divs = []
+    for i, tile in enumerate(tiles_data):
         ti: TileInfo = tile["info"]
         is_processed = bool(tile.get("processed_b64"))
-        is_selected = (i == selected_idx)
+        status = "processed" if is_processed else "default"
+        selected_class = " selected" if i == selected_idx else ""
+
+        if is_processed and tile.get("processed_b64"):
+            # Show the processed tile image directly as background (full tile fill)
+            proc_b64 = tile["processed_b64"]
+            bg_style = (
+                f"background-image: url('data:image/jpeg;base64,{proc_b64}');"
+                "background-size: 100% 100%;"
+                "background-position: 0% 0%;"
+            )
+        else:
+            # Crop the full image using CSS background-position math.
+            # background-size: (img_w / tile_w * 100)% (img_h / tile_h * 100)%
+            # background-position: (x / (img_w - tile_w) * 100)% (y / (img_h - tile_h) * 100)%
+            tile_w = ti.w
+            tile_h = ti.h
+
+            bg_size_x = img_w / tile_w * 100 if tile_w > 0 else 100
+            bg_size_y = img_h / tile_h * 100 if tile_h > 0 else 100
+
+            bp_x = ti.x / (img_w - tile_w) * 100 if img_w > tile_w else 0.0
+            bp_y = ti.y / (img_h - tile_h) * 100 if img_h > tile_h else 0.0
+
+            bg_style = (
+                f"background-image: url('data:image/jpeg;base64,{full_image_b64}');"
+                f"background-size: {bg_size_x:.4f}% {bg_size_y:.4f}%;"
+                f"background-position: {bp_x:.4f}% {bp_y:.4f}%;"
+            )
+
         label = f"{ti.row},{ti.col}"
-        if is_processed:
-            label += " ✓"
-        tile_img = _b64_to_pil(tile["original_b64"])
-        thumb = _make_tile_thumbnail(tile_img, label, is_selected, is_processed)
-        caption = f"Tile {ti.row},{ti.col}"
-        if is_processed:
-            caption += " ✓"
-        items.append((thumb, caption))
-    return items
+        tile_divs.append(
+            f'<div class="tile{selected_class}" '
+            f'data-idx="{i}" data-row="{ti.row}" data-col="{ti.col}" '
+            f'data-status="{status}" '
+            f'style="{bg_style}">'
+            f'<span class="tile-label">{label}</span>'
+            f'<span class="tile-status-icon"></span>'
+            f'</div>'
+        )
+
+    tiles_html = "\n".join(tile_divs)
+    aspect = f"{img_w} / {img_h}"
+
+    html = (
+        f'<div id="tile-grid-root" '
+        f'data-rows="{grid_rows}" data-cols="{grid_cols}" '
+        f'data-img-w="{img_w}" data-img-h="{img_h}" '
+        f'data-selected="{selected_idx}">'
+        f'<div class="tile-grid" '
+        f'style="grid-template-columns: repeat({grid_cols}, 1fr); aspect-ratio: {aspect};">'
+        f'{tiles_html}'
+        f'</div>'
+        f'</div>'
+        f'{_TILE_GRID_CSS}'
+        f'{_TILE_GRID_JS}'
+    )
+    return html
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +352,40 @@ def _build_tile_state(tile_info: TileInfo, tile_img: Image.Image) -> Dict[str, A
     }
 
 
+def _compute_display_dims(orig_w: int, orig_h: int, max_side: int = 2048) -> Tuple[int, int]:
+    """Compute display image dimensions after optional downscale."""
+    if max(orig_w, orig_h) > max_side:
+        scale = max_side / max(orig_w, orig_h)
+        return int(orig_w * scale), int(orig_h * scale)
+    return orig_w, orig_h
+
+
+def _scale_tiles_for_display(
+    tiles_state: List[Dict],
+    orig_w: int,
+    orig_h: int,
+    display_w: int,
+    display_h: int,
+) -> List[Dict]:
+    """Return a copy of tiles_state with TileInfo coords scaled to display image space."""
+    scale_x = display_w / orig_w
+    scale_y = display_h / orig_h
+    scaled = []
+    for tile in tiles_state:
+        ti: TileInfo = tile["info"]
+        scaled_ti = TileInfo(
+            row=ti.row,
+            col=ti.col,
+            x=int(ti.x * scale_x),
+            y=int(ti.y * scale_y),
+            w=int(ti.w * scale_x),
+            h=int(ti.h * scale_y),
+            tile_id=ti.tile_id,
+        )
+        scaled.append({**tile, "info": scaled_ti})
+    return scaled
+
+
 def _on_image_upload(
     image: Optional[Image.Image],
     resolution_choice: str,
@@ -214,12 +398,14 @@ def _on_image_upload(
     int,                    # selected_idx_state (-1)
     Optional[Image.Image],  # original_img_state
     int,                    # grid_cols_state
-    List[Tuple],            # gallery items
+    str,                    # full_image_b64_state
+    str,                    # tile_grid_html (gr.HTML value)
     str,                    # status
 ]:
-    """Handle image upload: upscale to target resolution, calculate tiles, populate gallery."""
+    """Handle image upload: upscale to target resolution, calculate tiles, build HTML grid."""
+    _empty_html = "<p style='color:#888; padding:16px;'>Upload an image to see the tile grid.</p>"
     if image is None:
-        return [], -1, None, 1, [], "No image uploaded."
+        return [], -1, None, 1, "", _empty_html, "No image uploaded."
 
     target_w, target_h = _compute_target_size(image.size, resolution_choice, custom_w, custom_h)
     target_w = min(target_w, config.MAX_RESOLUTION)
@@ -236,14 +422,43 @@ def _on_image_upload(
     else:
         grid_cols = 1
 
-    gallery_items = _build_gallery_items(tiles_state, -1)
+    # Encode the full image as JPEG for the grid display (downscaled to 2048 max)
+    full_image_b64 = _encode_grid_image(upscaled, max_side=2048, quality=75)
+
+    # Compute display image dimensions (after potential downscale)
+    display_w, display_h = _compute_display_dims(upscaled.width, upscaled.height, max_side=2048)
+
+    # Scale tile coords to display image space for CSS background-position math
+    scaled_tiles = _scale_tiles_for_display(tiles_state, upscaled.width, upscaled.height, display_w, display_h)
+
+    grid_html = _build_tile_grid_html(scaled_tiles, full_image_b64, -1, display_w, display_h)
 
     status = (
         f"✅ Image upscaled to {target_w}×{target_h}. "
         f"Grid: {len(tiles_state)} tiles ({tile_size}px, overlap {overlap}px). "
         f"Click a tile to select it."
     )
-    return tiles_state, -1, upscaled, grid_cols, gallery_items, status
+    return tiles_state, -1, upscaled, grid_cols, full_image_b64, grid_html, status
+
+
+def _rebuild_grid_html(
+    tiles_state: List[Dict],
+    full_image_b64: str,
+    selected_idx: int,
+    original_img: Optional[Image.Image],
+) -> str:
+    """Rebuild the tile grid HTML from current state.
+
+    Handles coordinate scaling from original image space to display image space.
+    """
+    _empty_html = "<p style='color:#888; padding:16px;'>Upload an image to see the tile grid.</p>"
+    if not tiles_state or original_img is None or not full_image_b64:
+        return _empty_html
+
+    orig_w, orig_h = original_img.size
+    display_w, display_h = _compute_display_dims(orig_w, orig_h, max_side=2048)
+    scaled_tiles = _scale_tiles_for_display(tiles_state, orig_w, orig_h, display_w, display_h)
+    return _build_tile_grid_html(scaled_tiles, full_image_b64, selected_idx, display_w, display_h)
 
 
 def _on_prompt_edit(
@@ -460,6 +675,14 @@ def create_upscale_tab(client: RunPodClient) -> None:
         original_img_state = gr.State(value=None)
         grid_cols_state = gr.State(value=1)
         loras_state = gr.State(value=[])
+        full_image_b64_state = gr.State(value="")
+
+        # Hidden textbox for JS → Python tile selection communication
+        tile_selected_idx_tb = gr.Textbox(
+            value="-1",
+            visible=False,
+            elem_id="tile-selected-idx",
+        )
 
         # ----------------------------------------------------------------
         # TOP: Full-width image upload + resolution
@@ -513,16 +736,11 @@ def create_upscale_tab(client: RunPodClient) -> None:
             # ============================================================
             with gr.Column(scale=13, min_width=480):
 
-                # ---- Unified tile grid gallery ----
+                # ---- Custom HTML tile grid ----
                 gr.Markdown("### 🗂️ Tile Grid — click to select")
-                tile_gallery = gr.Gallery(
-                    label="Tile Grid",
-                    columns=4,
-                    height=380,
-                    object_fit="contain",
-                    allow_preview=False,
-                    elem_classes=["tile-grid-gallery"],
-                    show_label=False,
+                tile_grid_html = gr.HTML(
+                    value="<p style='color:#888; padding:16px;'>Upload an image to see the tile grid.</p>",
+                    elem_id="tile-grid-container",
                 )
 
                 # ---- Selected tile detail panel ----
@@ -760,61 +978,56 @@ def create_upscale_tab(client: RunPodClient) -> None:
         )
 
         # ----------------------------------------------------------------
-        # Image upload → calculate tiles → populate gallery
+        # Image upload → calculate tiles → build HTML tile grid
         # ----------------------------------------------------------------
         def on_upload(img, res, cw, ch, ts, ov):
             return _on_image_upload(img, res, cw, ch, int(ts), int(ov))
 
-        def _update_gallery_cols(grid_cols: int):
-            """Return a gallery update with the correct column count."""
-            return gr.update(columns=max(1, grid_cols))
+        _upload_outputs = [
+            tiles_state, selected_idx_state, original_img_state,
+            grid_cols_state, full_image_b64_state,
+            tile_grid_html, status_text,
+        ]
 
         image_input.upload(
             fn=on_upload,
             inputs=[image_input, resolution_dd, custom_w, custom_h, tile_size_num, overlap_num],
-            outputs=[tiles_state, selected_idx_state, original_img_state, grid_cols_state, tile_gallery, status_text],
-        ).then(
-            fn=_update_gallery_cols,
-            inputs=[grid_cols_state],
-            outputs=[tile_gallery],
+            outputs=_upload_outputs,
         )
 
         image_input.change(
             fn=on_upload,
             inputs=[image_input, resolution_dd, custom_w, custom_h, tile_size_num, overlap_num],
-            outputs=[tiles_state, selected_idx_state, original_img_state, grid_cols_state, tile_gallery, status_text],
-        ).then(
-            fn=_update_gallery_cols,
-            inputs=[grid_cols_state],
-            outputs=[tile_gallery],
+            outputs=_upload_outputs,
         )
 
         # Regenerate grid button (re-runs the same upload logic)
         regen_grid_btn.click(
             fn=on_upload,
             inputs=[image_input, resolution_dd, custom_w, custom_h, tile_size_num, overlap_num],
-            outputs=[tiles_state, selected_idx_state, original_img_state, grid_cols_state, tile_gallery, status_text],
-        ).then(
-            fn=_update_gallery_cols,
-            inputs=[grid_cols_state],
-            outputs=[tile_gallery],
+            outputs=_upload_outputs,
         )
 
         # ----------------------------------------------------------------
-        # Gallery tile selection → update selected tile detail panel
+        # JS tile click → hidden textbox → Python selection handler
         # ----------------------------------------------------------------
-        def on_gallery_select(
-            evt: gr.SelectData,
+        def on_tile_selected(
+            idx_str: str,
             tiles: List[Dict],
-            current_selected: int,
+            full_b64: str,
+            orig_img: Optional[Image.Image],
         ):
-            """Handle gallery tile click: update selected index and detail panel."""
-            idx = evt.index
-            if not tiles or idx >= len(tiles):
-                return current_selected, None, None, "", _build_gallery_items(tiles, current_selected)
+            """Handle tile selection from JS: update selected index and detail panel."""
+            try:
+                idx = int(idx_str)
+            except (ValueError, TypeError):
+                idx = -1
+
+            if not tiles or idx < 0 or idx >= len(tiles):
+                grid_html = _rebuild_grid_html(tiles, full_b64, -1, orig_img)
+                return -1, None, None, "", grid_html
 
             tile = tiles[idx]
-            ti: TileInfo = tile["info"]
             prompt = tile.get("prompt", "")
 
             # Show original tile
@@ -822,15 +1035,15 @@ def create_upscale_tab(client: RunPodClient) -> None:
             # Show processed tile if available
             proc_tile = _b64_to_pil(tile["processed_b64"]) if tile.get("processed_b64") else None
 
-            # Rebuild gallery with new selection highlighted
-            gallery_items = _build_gallery_items(tiles, idx)
+            # Rebuild grid HTML with new selection highlighted
+            grid_html = _rebuild_grid_html(tiles, full_b64, idx, orig_img)
 
-            return idx, orig_tile, proc_tile, prompt, gallery_items
+            return idx, orig_tile, proc_tile, prompt, grid_html
 
-        tile_gallery.select(
-            fn=on_gallery_select,
-            inputs=[tiles_state, selected_idx_state],
-            outputs=[selected_idx_state, tile_orig_preview, tile_proc_preview, tile_prompt_box, tile_gallery],
+        tile_selected_idx_tb.change(
+            fn=on_tile_selected,
+            inputs=[tile_selected_idx_tb, tiles_state, full_image_b64_state, original_img_state],
+            outputs=[selected_idx_state, tile_orig_preview, tile_proc_preview, tile_prompt_box, tile_grid_html],
         )
 
         # ----------------------------------------------------------------
@@ -904,8 +1117,9 @@ def create_upscale_tab(client: RunPodClient) -> None:
             ip_enabled, ip_img, ip_scale,
             seam_fix_enabled, seam_fix_strength, seam_fix_feather,
             gen_res_label,
+            full_b64,
         ):
-            """Upscale all tiles and return updated gallery + assembled result.
+            """Upscale all tiles and return updated grid HTML + assembled result.
 
             When seam_fix_enabled is True, a second pass is run with the tile
             grid shifted by half a stride in both X and Y.  The offset tiles
@@ -935,8 +1149,8 @@ def create_upscale_tab(client: RunPodClient) -> None:
 
             if result is None:
                 # Pass 1 failed — return early
-                gallery_items = _build_gallery_items(updated, -1)
-                return updated, gallery_items, result, msg
+                grid_html = _rebuild_grid_html(updated, full_b64, -1, orig_img)
+                return updated, grid_html, result, msg
 
             # ------------------------------------------------------------------
             # Pass 2 — offset grid seam fix (optional)
@@ -1029,9 +1243,9 @@ def create_upscale_tab(client: RunPodClient) -> None:
                 except Exception as exc:  # noqa: BLE001
                     msg = msg.rstrip(".") + f" | ⚠️ Seam fix error: {exc}"
 
-            # Rebuild gallery to show processed checkmarks
-            gallery_items = _build_gallery_items(updated, -1)
-            return updated, gallery_items, result, msg
+            # Rebuild grid HTML to show processed checkmarks
+            grid_html = _rebuild_grid_html(updated, full_b64, -1, orig_img)
+            return updated, grid_html, result, msg
 
         upscale_all_btn.click(
             fn=on_upscale_all,
@@ -1045,8 +1259,9 @@ def create_upscale_tab(client: RunPodClient) -> None:
                 ip_adapter_cb, ip_style_image, ip_scale_sl,
                 seam_fix_cb, seam_fix_strength_sl, seam_fix_feather_sl,
                 gen_res_dd,
+                full_image_b64_state,
             ],
-            outputs=[tiles_state, tile_gallery, result_image, status_text],
+            outputs=[tiles_state, tile_grid_html, result_image, status_text],
         )
 
         # ----------------------------------------------------------------
@@ -1061,10 +1276,12 @@ def create_upscale_tab(client: RunPodClient) -> None:
             cn_enabled, cond_scale,
             ip_enabled, ip_img, ip_scale,
             gen_res_label,
+            full_b64,
         ):
             """Upscale only the currently selected tile."""
             if selected_idx < 0:
-                return tiles, None, None, None, "⚠️ No tile selected. Click a tile in the grid first."
+                grid_html = _rebuild_grid_html(tiles, full_b64, selected_idx, orig_img)
+                return tiles, grid_html, None, None, "⚠️ No tile selected. Click a tile in the grid first."
             gen_res_val = _GEN_RES_LABEL_TO_VALUE.get(gen_res_label, 0)
             updated, result, msg = _upscale_tiles_batch(
                 tiles, [selected_idx], orig_img,
@@ -1079,11 +1296,11 @@ def create_upscale_tab(client: RunPodClient) -> None:
                 ip_adapter_scale=ip_scale,
                 gen_res=gen_res_val,
             )
-            # Refresh gallery and selected tile preview
-            gallery_items = _build_gallery_items(updated, selected_idx)
+            # Rebuild grid HTML with updated tile status, keep selection
+            grid_html = _rebuild_grid_html(updated, full_b64, selected_idx, orig_img)
             tile = updated[selected_idx]
             proc_tile = _b64_to_pil(tile["processed_b64"]) if tile.get("processed_b64") else None
-            return updated, gallery_items, proc_tile, result, msg
+            return updated, grid_html, proc_tile, result, msg
 
         upscale_sel_btn.click(
             fn=on_upscale_selected,
@@ -1096,20 +1313,21 @@ def create_upscale_tab(client: RunPodClient) -> None:
                 controlnet_cb, cond_scale_sl,
                 ip_adapter_cb, ip_style_image, ip_scale_sl,
                 gen_res_dd,
+                full_image_b64_state,
             ],
-            outputs=[tiles_state, tile_gallery, tile_proc_preview, result_image, status_text],
+            outputs=[tiles_state, tile_grid_html, tile_proc_preview, result_image, status_text],
         )
 
         # ----------------------------------------------------------------
         # Auto-caption all tiles
         # ----------------------------------------------------------------
-        def on_caption_all(tiles, sys_prompt: str):
+        def on_caption_all(tiles, sys_prompt: str, full_b64: str, orig_img):
             updated, msg = _caption_all_tiles(tiles, sys_prompt, client)
-            gallery_items = _build_gallery_items(updated, -1)
-            return updated, gallery_items, msg
+            grid_html = _rebuild_grid_html(updated, full_b64, -1, orig_img)
+            return updated, grid_html, msg
 
         caption_btn.click(
             fn=on_caption_all,
-            inputs=[tiles_state, global_prompt],
-            outputs=[tiles_state, tile_gallery, status_text],
+            inputs=[tiles_state, global_prompt, full_image_b64_state, original_img_state],
+            outputs=[tiles_state, tile_grid_html, status_text],
         )

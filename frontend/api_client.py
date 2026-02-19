@@ -1,10 +1,21 @@
 """
 RunPod API client for the AI Assets Toolbox frontend.
 
-Handles all communication with the RunPod serverless endpoint:
+Handles all communication with the RunPod serverless endpoints:
   - Synchronous jobs via /runsync
   - Asynchronous jobs via /run + polling
   - Caption, upscale, and model management actions
+
+Multi-endpoint architecture
+---------------------------
+  - Upscale worker  → handles: upscale, upscale_regions, list_models,
+                                upload_model, delete_model, health
+  - Caption worker  → handles: caption, health
+
+Public endpoint
+---------------
+  - QwenImageEditClient → RunPod public Qwen-Image-Edit endpoint
+                          (for future spritesheet tab use)
 """
 from __future__ import annotations
 
@@ -20,21 +31,57 @@ class RunPodError(Exception):
     """Raised when the RunPod API returns an error or times out."""
 
 
+# Actions that must be routed to the caption worker endpoint.
+_CAPTION_ACTIONS = frozenset({"caption"})
+
+
 class RunPodClient:
-    """Thin wrapper around the RunPod serverless REST API."""
+    """
+    Wrapper around the RunPod serverless REST API supporting two separate
+    worker endpoints: one for upscaling/model management and one for captioning.
+    """
 
     def __init__(
         self,
         api_key: Optional[str] = None,
+        upscale_endpoint_id: Optional[str] = None,
+        caption_endpoint_id: Optional[str] = None,
+        # Legacy single-endpoint parameter kept for backward compatibility.
         endpoint_id: Optional[str] = None,
     ) -> None:
         self.api_key = api_key or config.RUNPOD_API_KEY
-        self.endpoint_id = endpoint_id or config.RUNPOD_ENDPOINT_ID
-        self.base_url = f"https://api.runpod.ai/v2/{self.endpoint_id}"
+
+        # Resolve upscale endpoint: explicit arg → config var → legacy fallback
+        self.upscale_endpoint_id = (
+            upscale_endpoint_id
+            or config.RUNPOD_UPSCALE_ENDPOINT_ID
+            or endpoint_id
+            or config.RUNPOD_ENDPOINT_ID
+        )
+
+        # Resolve caption endpoint: explicit arg → config var → fall back to upscale
+        self.caption_endpoint_id = (
+            caption_endpoint_id
+            or config.RUNPOD_CAPTION_ENDPOINT_ID
+            or endpoint_id
+            or self.upscale_endpoint_id
+        )
+
+        self.upscale_base_url = f"https://api.runpod.ai/v2/{self.upscale_endpoint_id}"
+        self.caption_base_url = f"https://api.runpod.ai/v2/{self.caption_endpoint_id}"
+
+        # Legacy attribute so any code that reads .base_url still works.
+        self.base_url = self.upscale_base_url
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _get_base_url(self, action: str) -> str:
+        """Route an action to the correct worker endpoint base URL."""
+        if action in _CAPTION_ACTIONS:
+            return self.caption_base_url
+        return self.upscale_base_url
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -42,8 +89,14 @@ class RunPodClient:
             "Content-Type": "application/json",
         }
 
-    def _post(self, path: str, payload: Dict[str, Any], timeout: int = config.RUNSYNC_TIMEOUT) -> Dict[str, Any]:
-        url = f"{self.base_url}{path}"
+    def _post(
+        self,
+        path: str,
+        payload: Dict[str, Any],
+        timeout: int = config.RUNSYNC_TIMEOUT,
+        base_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        url = f"{base_url or self.upscale_base_url}{path}"
         try:
             resp = requests.post(url, json=payload, headers=self._headers(), timeout=timeout)
             resp.raise_for_status()
@@ -55,8 +108,13 @@ class RunPodClient:
         except requests.exceptions.RequestException as exc:
             raise RunPodError(f"Network error: {exc}") from exc
 
-    def _get(self, path: str, timeout: int = 30) -> Dict[str, Any]:
-        url = f"{self.base_url}{path}"
+    def _get(
+        self,
+        path: str,
+        timeout: int = 30,
+        base_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        url = f"{base_url or self.upscale_base_url}{path}"
         try:
             resp = requests.get(url, headers=self._headers(), timeout=timeout)
             resp.raise_for_status()
@@ -87,35 +145,49 @@ class RunPodClient:
         """
         Submit a job to /runsync and return the output directly.
 
-        RunPod will block until the job completes (up to RUNSYNC_TIMEOUT seconds).
+        The request is automatically routed to the correct worker endpoint
+        based on the action name.  RunPod will block until the job completes
+        (up to RUNSYNC_TIMEOUT seconds).
         """
         body = {"input": {"action": action, **payload}}
-        response = self._post("/runsync", body, timeout=config.RUNSYNC_TIMEOUT)
+        base_url = self._get_base_url(action)
+        response = self._post("/runsync", body, timeout=config.RUNSYNC_TIMEOUT, base_url=base_url)
         return self._extract_output(response)
 
     def run_async(self, action: str, payload: Dict[str, Any]) -> str:
         """
         Submit a job to /run and return the job_id for later polling.
+
+        The request is automatically routed to the correct worker endpoint.
         """
         body = {"input": {"action": action, **payload}}
-        response = self._post("/run", body, timeout=30)
+        base_url = self._get_base_url(action)
+        response = self._post("/run", body, timeout=30, base_url=base_url)
         job_id = response.get("id")
         if not job_id:
             raise RunPodError(f"RunPod /run did not return a job id: {response}")
         return job_id
 
-    def get_status(self, job_id: str) -> Dict[str, Any]:
-        """Return the raw status response for a job."""
-        return self._get(f"/status/{job_id}")
+    def get_status(self, job_id: str, action: str = "") -> Dict[str, Any]:
+        """
+        Return the raw status response for a job.
 
-    def wait_for_job(self, job_id: str) -> Any:
+        Pass the original *action* so the status poll is sent to the same
+        endpoint that accepted the job.  Defaults to the upscale endpoint.
+        """
+        base_url = self._get_base_url(action) if action else self.upscale_base_url
+        return self._get(f"/status/{job_id}", base_url=base_url)
+
+    def wait_for_job(self, job_id: str, action: str = "") -> Any:
         """
         Poll get_status until the job is complete, then return the output.
         Raises RunPodError on failure or timeout.
+
+        Pass the original *action* so polling targets the correct endpoint.
         """
         deadline = time.time() + config.POLL_TIMEOUT
         while time.time() < deadline:
-            response = self.get_status(job_id)
+            response = self.get_status(job_id, action=action)
             status = response.get("status", "")
             if status in ("COMPLETED", "FAILED", "CANCELLED"):
                 return self._extract_output(response)
@@ -408,6 +480,190 @@ class RunPodClient:
         return output
 
     def health_check(self) -> Dict[str, Any]:
-        """Run a health check against the RunPod endpoint."""
+        """Run a health check against the upscale RunPod endpoint."""
         output = self.run_sync("health", {})
         return output
+
+    def caption_health_check(self) -> Dict[str, Any]:
+        """Run a health check against the caption RunPod endpoint."""
+        output = self.run_sync("caption_health", {})
+        return output
+
+
+# ---------------------------------------------------------------------------
+# Public endpoint client — Qwen-Image-Edit
+# ---------------------------------------------------------------------------
+
+class QwenImageEditClient:
+    """
+    Client for the RunPod public Qwen-Image-Edit endpoint.
+
+    This endpoint is used for image editing tasks (e.g. background replacement,
+    style transfer) and is intended for future use in the Spritesheet tab.
+
+    Endpoint docs:
+        https://docs.runpod.io/public-endpoints/models/qwen-image-edit-2511-lora
+
+    IMPORTANT — Image URL requirement
+    ----------------------------------
+    The Qwen-Image-Edit endpoint requires images to be provided as **URLs**,
+    not base64-encoded strings.  Before calling ``edit_image``, the caller
+    must upload the source image to a publicly accessible location and pass
+    the resulting URL.
+
+    TODO (spritesheet tab): implement a helper that uploads a PIL image or
+    base64 blob to a temporary hosting service (e.g. RunPod's own upload API,
+    Cloudinary, or an S3 pre-signed URL) and returns a public URL, then wire
+    that helper into the spritesheet workflow.
+    """
+
+    #: Default endpoint URL; can be overridden via RUNPOD_IMAGE_EDIT_ENDPOINT.
+    DEFAULT_ENDPOINT = "https://api.runpod.ai/v2/qwen-image-edit-2511-lora"
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        endpoint_url: Optional[str] = None,
+    ) -> None:
+        self.api_key = api_key or config.RUNPOD_API_KEY
+        self.endpoint_url = (
+            endpoint_url
+            or config.RUNPOD_IMAGE_EDIT_ENDPOINT
+            or self.DEFAULT_ENDPOINT
+        ).rstrip("/")
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _headers(self) -> Dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+    def _post(self, path: str, payload: Dict[str, Any], timeout: int = 30) -> Dict[str, Any]:
+        url = f"{self.endpoint_url}{path}"
+        try:
+            resp = requests.post(url, json=payload, headers=self._headers(), timeout=timeout)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.Timeout:
+            raise RunPodError(f"Request to {path} timed out after {timeout}s")
+        except requests.exceptions.HTTPError as exc:
+            raise RunPodError(f"HTTP {exc.response.status_code} from Qwen endpoint: {exc.response.text}") from exc
+        except requests.exceptions.RequestException as exc:
+            raise RunPodError(f"Network error: {exc}") from exc
+
+    def _get(self, path: str, timeout: int = 30) -> Dict[str, Any]:
+        url = f"{self.endpoint_url}{path}"
+        try:
+            resp = requests.get(url, headers=self._headers(), timeout=timeout)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.Timeout:
+            raise RunPodError(f"GET {path} timed out")
+        except requests.exceptions.HTTPError as exc:
+            raise RunPodError(f"HTTP {exc.response.status_code}: {exc.response.text}") from exc
+        except requests.exceptions.RequestException as exc:
+            raise RunPodError(f"Network error: {exc}") from exc
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def submit_edit(
+        self,
+        image_url: str,
+        prompt: str,
+        negative_prompt: str = "",
+        guidance_scale: float = 7.5,
+        num_inference_steps: int = 28,
+        seed: int = -1,
+    ) -> str:
+        """
+        Submit an image-editing job and return the RunPod job ID.
+
+        Args:
+            image_url: Publicly accessible URL of the source image.
+                       **Must be a URL — base64 is not accepted by this endpoint.**
+            prompt: Text description of the desired edit.
+            negative_prompt: Things to avoid in the output.
+            guidance_scale: Classifier-free guidance scale (default 7.5).
+            num_inference_steps: Diffusion steps (default 28).
+            seed: Random seed; -1 for random.
+
+        Returns:
+            RunPod job ID string for use with ``poll_edit``.
+        """
+        payload = {
+            "input": {
+                "image": image_url,
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "guidance_scale": guidance_scale,
+                "num_inference_steps": num_inference_steps,
+                "seed": seed,
+            }
+        }
+        response = self._post("/run", payload, timeout=30)
+        job_id = response.get("id")
+        if not job_id:
+            raise RunPodError(f"Qwen endpoint /run did not return a job id: {response}")
+        return job_id
+
+    def get_status(self, job_id: str) -> Dict[str, Any]:
+        """Return the raw status response for a Qwen-Image-Edit job."""
+        return self._get(f"/status/{job_id}")
+
+    def wait_for_edit(self, job_id: str) -> str:
+        """
+        Poll until the edit job completes and return the output image URL.
+
+        Returns:
+            URL string pointing to the generated image.
+
+        Raises:
+            RunPodError: on job failure, cancellation, or poll timeout.
+        """
+        deadline = time.time() + config.POLL_TIMEOUT
+        while time.time() < deadline:
+            response = self.get_status(job_id)
+            status = response.get("status", "")
+            if status == "COMPLETED":
+                output = response.get("output", {})
+                image_url = output.get("image") if isinstance(output, dict) else None
+                if not image_url:
+                    raise RunPodError(f"Qwen job completed but output has no 'image': {response}")
+                return image_url
+            if status in ("FAILED", "CANCELLED"):
+                raise RunPodError(
+                    f"Qwen job {job_id} ended with status {status}: "
+                    f"{response.get('error', 'unknown error')}"
+                )
+            time.sleep(config.POLL_INTERVAL)
+        raise RunPodError(f"Qwen job {job_id} did not complete within {config.POLL_TIMEOUT}s")
+
+    def edit_image(
+        self,
+        image_url: str,
+        prompt: str,
+        negative_prompt: str = "",
+        guidance_scale: float = 7.5,
+        num_inference_steps: int = 28,
+        seed: int = -1,
+    ) -> str:
+        """
+        Convenience wrapper: submit an edit job and block until it completes.
+
+        Returns the output image URL.  See ``submit_edit`` for parameter docs.
+        """
+        job_id = self.submit_edit(
+            image_url=image_url,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            guidance_scale=guidance_scale,
+            num_inference_steps=num_inference_steps,
+            seed=seed,
+        )
+        return self.wait_for_edit(job_id)
