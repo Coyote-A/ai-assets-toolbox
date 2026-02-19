@@ -380,7 +380,6 @@ def _scale_tiles_for_display(
             y=int(ti.y * scale_y),
             w=int(ti.w * scale_x),
             h=int(ti.h * scale_y),
-            tile_id=ti.tile_id,
         )
         scaled.append({**tile, "info": scaled_ti})
     return scaled
