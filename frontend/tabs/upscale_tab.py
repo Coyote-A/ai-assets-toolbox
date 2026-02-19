@@ -177,16 +177,7 @@ _TILE_GRID_CSS = """
   background-repeat: no-repeat;
   background-size: 100% 100%;
 }
-/* ── Selection dimming ────────────────────────────────────────────────────── */
-.tile-grid-wrap.has-selection .tile:not(.selected)::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.45);
-  pointer-events: none;
-  z-index: 2;
-  transition: background 0.15s ease;
-}
+/* ── Selected tile highlight ──────────────────────────────────────────────── */
 .tile.selected {
   z-index: 3;
   box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12),

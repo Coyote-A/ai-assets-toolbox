@@ -251,7 +251,15 @@ class ModelManager:
             except Exception as exc:  # pylint: disable=broad-except
                 logger.warning("Could not unfuse previous LoRA: %s", exc)
 
-        lora_path = self._resolve_lora_path(lora_name)
+        try:
+            lora_path = self._resolve_lora_path(lora_name)
+        except FileNotFoundError as exc:
+            logger.warning(
+                "Skipping LoRA '%s' — file not found (upscale will continue without it): %s",
+                lora_name, exc,
+            )
+            return
+
         logger.info("Applying LoRA '%s' (weight=%.2f) from '%s'", lora_name, weight, lora_path)
 
         self._diffusion_pipe.load_lora_weights(lora_path)
