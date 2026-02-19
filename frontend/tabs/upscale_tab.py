@@ -14,8 +14,12 @@ tiles_state          : list[dict]  — per-tile data (info, prompt, processed im
 selected_idx_state   : int         — currently selected tile index (-1 = none)
 original_img_state   : PIL.Image   — the uploaded (and upscaled) image
 grid_cols_state      : int         — number of columns in the tile grid
-loras_state          : list[dict]  — active LoRAs [{name, weight}, ...]
 full_image_b64_state : str         — base64 JPEG of the full upscaled image for grid display
+
+LoRAs
+-----
+Three CivitAI LoRAs are hardcoded and automatically included in every upscale request
+with weight 1.0.  They are downloaded at container startup by ensure_loras_downloaded().
 """
 from __future__ import annotations
 
@@ -41,6 +45,7 @@ from tiling import (
     upscale_image,
     calculate_offset_tiles,
     blend_offset_pass,
+    generate_mask_blur_preview,
 )
 
 
@@ -82,6 +87,13 @@ RESOLUTION_LONG_SIDE: Dict[str, Optional[int]] = {
 
 # The single active model (hardcoded — only illustrious-xl is supported)
 ACTIVE_MODEL = "illustrious-xl"
+
+# Hardcoded LoRAs — automatically included in every upscale request
+HARDCODED_LORAS = [
+    {"name": "lora_929497", "weight": 1.0},
+    {"name": "lora_100435", "weight": 1.0},
+    {"name": "lora_1231943", "weight": 1.0},
+]
 
 # Generation resolution presets: (label, value) where 0 means "same as grid tile size"
 GENERATION_RES_CHOICES = [
@@ -200,20 +212,7 @@ _TILE_GRID_CSS = """
   box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12),
               inset 0 0 0 1.5px rgba(74, 128, 255, 0.6);
 }
-/* ── Tile labels & icons ──────────────────────────────────────────────────── */
-.tile-label {
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  background: rgba(0, 0, 0, 0.7);
-  color: #fff;
-  font-size: 11px;
-  padding: 1px 5px;
-  border-radius: 3px;
-  pointer-events: none;
-  font-family: monospace;
-  z-index: 5;
-}
+/* ── Tile icons ───────────────────────────────────────────────────────────── */
 .tile-status-icon {
   position: absolute;
   bottom: 3px;
@@ -253,7 +252,6 @@ _TILE_GRID_CSS = """
   background: linear-gradient(to top, rgba(255, 165, 0, 0.35), transparent);
 }
 @media (max-width: 900px) {
-  .tile-label { font-size: 9px; }
 }
 </style>
 """
@@ -359,8 +357,6 @@ def _build_tile_grid_html(
             # Unprocessed tile: transparent — the container background shows through
             bg_style = ""
 
-        label = f"{ti.row},{ti.col}"
-
         # Overlap zone widths as % of this tile's own dimensions
         overlap_pct_x = (overlap / ti.w * 100) if ti.w > 0 else 0.0
         overlap_pct_y = (overlap / ti.h * 100) if ti.h > 0 else 0.0
@@ -391,7 +387,6 @@ def _build_tile_grid_html(
             f'data-status="{status}" '
             f'onclick="{_TILE_ONCLICK_JS}" '
             f'style="{pos_style}{bg_style}">'
-            f'<span class="tile-label">{label}</span>'
             f'<span class="tile-status-icon"></span>'
             f'{overlap_html}'
             f'</div>'
@@ -574,12 +569,37 @@ def _caption_all_tiles(
     return tiles_state, f"✅ Captioned {len(captions)} tile(s)."
 
 
+def _caption_selected_tile(
+    selected_idx: int,
+    tiles_state: List[Dict],
+    system_prompt: Optional[str],
+    client: RunPodClient,
+) -> Tuple[List[Dict], str]:
+    """Send only the currently selected tile to RunPod for captioning."""
+    if selected_idx < 0 or selected_idx >= len(tiles_state):
+        return tiles_state, "⚠️ No tile selected. Click a tile in the grid first."
+
+    tile = tiles_state[selected_idx]
+    tiles_b64 = [{"tile_id": tile["tile_id"], "image_b64": tile["original_b64"]}]
+
+    try:
+        captions = client.caption_tiles(tiles_b64, system_prompt=system_prompt or None)
+    except RunPodError as exc:
+        return tiles_state, f"❌ Caption error: {exc}"
+
+    if captions:
+        caption_text = captions[0]["caption"]
+        tiles_state[selected_idx]["prompt"] = caption_text
+        return tiles_state, caption_text
+
+    return tiles_state, ""
+
+
 def _upscale_tiles_batch(
     tiles_state: List[Dict],
     indices: Optional[List[int]],
     original_img: Optional[Image.Image],
     # generation params
-    loras: List[Dict],
     global_prompt: str,
     negative_prompt: str,
     tile_size: int,
@@ -647,7 +667,7 @@ def _upscale_tiles_batch(
             "image_b64": tile_b64,
             "prompt_override": tile_prompt if tile_prompt else None,
             "model": ACTIVE_MODEL,
-            "loras": loras if loras else [],
+            "loras": HARDCODED_LORAS,
             "global_prompt": global_prompt,
             "negative_prompt": negative_prompt,
             "controlnet_enabled": controlnet_enabled,
@@ -704,35 +724,6 @@ def _upscale_tiles_batch(
 
 
 # ---------------------------------------------------------------------------
-# LoRA HTML renderer (module-level so it can be reused)
-# ---------------------------------------------------------------------------
-
-def _render_loras_html(loras: List[Dict]) -> str:
-    if not loras:
-        return "<p style='color: #888; font-size: 0.85em;'>No LoRAs added. Select a LoRA above and click ➕ Add.</p>"
-    rows = ""
-    for i, entry in enumerate(loras):
-        name = entry.get("name", "")
-        weight = entry.get("weight", 1.0)
-        bg = "#1e2030" if i % 2 == 0 else "#252840"
-        rows += (
-            f"<div style='display:flex;align-items:center;gap:8px;"
-            f"padding:5px 8px;border-bottom:1px solid #333;background:{bg};'>"
-            f"<span style='flex:1;font-size:0.85em;overflow:hidden;text-overflow:ellipsis;"
-            f"white-space:nowrap;color:#ddd;' title='{name}'>{name}</span>"
-            f"<span style='font-size:0.8em;color:#aaa;min-width:44px;text-align:right;'>"
-            f"&times;{weight:.2f}</span>"
-            f"</div>"
-        )
-    return (
-        "<div style='border:1px solid #444;border-radius:6px;max-height:160px;overflow-y:auto;'>"
-        + rows
-        + "</div>"
-        + f"<p style='font-size:0.75em;color:#888;margin:4px 0 0;'>{len(loras)} LoRA(s) active</p>"
-    )
-
-
-# ---------------------------------------------------------------------------
 # Tab builder
 # ---------------------------------------------------------------------------
 
@@ -748,7 +739,6 @@ def create_upscale_tab(client: RunPodClient) -> None:
         selected_idx_state = gr.State(value=-1)
         original_img_state = gr.State(value=None)
         grid_cols_state = gr.State(value=1)
-        loras_state = gr.State(value=[])
         full_image_b64_state = gr.State(value="")
 
         # Hidden textbox for JS → Python tile selection communication
@@ -816,7 +806,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
                     gr.Markdown("### 📌 Selected Tile")
                     with gr.Row():
                         tile_orig_preview = gr.Image(
-                            label="Original",
+                            label="Original + Blend Zones",
                             type="pil",
                             interactive=False,
                             height=200,
@@ -854,6 +844,11 @@ def create_upscale_tab(client: RunPodClient) -> None:
                         variant="secondary",
                         scale=1,
                     )
+                    caption_sel_btn = gr.Button(
+                        "🏷️ Caption Selected",
+                        variant="secondary",
+                        scale=1,
+                    )
 
                 # ---- Final result ----
                 gr.Markdown("### 🖼️ Final Result")
@@ -863,6 +858,10 @@ def create_upscale_tab(client: RunPodClient) -> None:
                     interactive=False,
                     height=400,
                 )
+                with gr.Row():
+                    download_btn = gr.Button("💾 Download Result", variant="secondary", scale=1)
+                    copy_to_input_btn = gr.Button("🔄 Output → Input", variant="secondary", scale=1)
+                download_file = gr.File(visible=False, label="Download")
 
             # ============================================================
             # RIGHT COLUMN (~35%): Settings accordions
@@ -951,30 +950,6 @@ def create_upscale_tab(client: RunPodClient) -> None:
                         0.0, 1.5, value=0.7, step=0.05,
                         label="Conditioning Scale",
                         info="Strength of ControlNet guidance. 0.5–0.9 recommended.",
-                    )
-
-                # ---- 📁 LoRA ----
-                with gr.Accordion("📁 LoRA", open=False):
-                    with gr.Row():
-                        lora_add_dd = gr.Dropdown(
-                            choices=["None"],
-                            value="None",
-                            label="Select LoRA",
-                            info="LoRAs are loaded from the RunPod network volume. Use the LoRA Manager tab to upload new ones.",
-                            scale=3,
-                        )
-                        lora_add_weight = gr.Slider(
-                            minimum=0.0, maximum=2.0, value=0.7, step=0.05,
-                            label="Weight",
-                            info="Blend strength for this LoRA. 0.5–1.0 is typical; >1.0 may over-saturate the style.",
-                            scale=2,
-                        )
-                    with gr.Row():
-                        lora_add_btn = gr.Button("➕ Add LoRA", variant="secondary", scale=1)
-                        lora_remove_btn = gr.Button("➖ Remove Last", variant="secondary", scale=1)
-                        lora_refresh_btn = gr.Button("🔄 Refresh", variant="secondary", scale=1)
-                    loras_display = gr.HTML(
-                        "<p style='color: #888; font-size: 0.85em;'>No LoRAs added.</p>"
                     )
 
                 # ---- 🖼️ IP-Adapter · Style Transfer ----
@@ -1071,6 +1046,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
             tiles: List[Dict],
             full_b64: str,
             orig_img: Optional[Image.Image],
+            overlap: float,
         ):
             """Handle tile selection from JS: update selected index and detail panel."""
             try:
@@ -1085,8 +1061,18 @@ def create_upscale_tab(client: RunPodClient) -> None:
             tile = tiles[idx]
             prompt = tile.get("prompt", "")
 
-            # Show original tile
-            orig_tile = _b64_to_pil(tile["original_b64"])
+            # Show original tile with mask blur (feather zone) overlay
+            orig_tile_pil = _b64_to_pil(tile["original_b64"])
+            if orig_img is not None:
+                img_w, img_h = orig_img.size
+                tile_info: TileInfo = tile["info"]
+                overlap_px = max(1, int(overlap))
+                orig_tile = generate_mask_blur_preview(
+                    orig_tile_pil, tile_info, overlap_px, img_w, img_h
+                )
+            else:
+                orig_tile = orig_tile_pil
+
             # Show processed tile if available
             proc_tile = _b64_to_pil(tile["processed_b64"]) if tile.get("processed_b64") else None
 
@@ -1097,7 +1083,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
 
         tile_selected_idx_tb.change(
             fn=on_tile_selected,
-            inputs=[tile_selected_idx_tb, tiles_state, full_image_b64_state, original_img_state],
+            inputs=[tile_selected_idx_tb, tiles_state, full_image_b64_state, original_img_state, overlap_num],
             outputs=[selected_idx_state, tile_orig_preview, tile_proc_preview, tile_prompt_box, tile_grid_html],
         )
 
@@ -1111,60 +1097,10 @@ def create_upscale_tab(client: RunPodClient) -> None:
         )
 
         # ----------------------------------------------------------------
-        # Populate LoRA dropdown on tab load
-        # ----------------------------------------------------------------
-        def _load_loras():
-            try:
-                models = client.list_models("lora")
-                names = ["None"] + [m.get("name", "") for m in models if m.get("name")]
-                return gr.update(choices=names, value="None")
-            except Exception:  # noqa: BLE001
-                return gr.update(choices=["None"], value="None")
-
-        # ----------------------------------------------------------------
-        # Multi-LoRA add / remove
-        # ----------------------------------------------------------------
-        def _add_lora_fn(loras: List[Dict], name: str, weight: float) -> Tuple[List[Dict], str]:
-            if not name or name == "None":
-                return loras, _render_loras_html(loras)
-            updated = [dict(e) for e in loras]
-            for entry in updated:
-                if entry["name"] == name:
-                    entry["weight"] = weight
-                    return updated, _render_loras_html(updated)
-            updated.append({"name": name, "weight": weight})
-            return updated, _render_loras_html(updated)
-
-        def _remove_last_lora_fn(loras: List[Dict]) -> Tuple[List[Dict], str]:
-            updated = list(loras)
-            if updated:
-                updated.pop()
-            return updated, _render_loras_html(updated)
-
-        lora_add_btn.click(
-            fn=_add_lora_fn,
-            inputs=[loras_state, lora_add_dd, lora_add_weight],
-            outputs=[loras_state, loras_display],
-        )
-
-        lora_remove_btn.click(
-            fn=_remove_last_lora_fn,
-            inputs=[loras_state],
-            outputs=[loras_state, loras_display],
-        )
-
-        lora_refresh_btn.click(
-            fn=_load_loras,
-            inputs=[],
-            outputs=[lora_add_dd],
-        )
-
-        # ----------------------------------------------------------------
         # Upscale All Tiles
         # ----------------------------------------------------------------
         def on_upscale_all(
             tiles, orig_img,
-            loras,
             g_prompt, neg_prompt,
             ts, ov,
             strength, steps, cfg, seed,
@@ -1190,7 +1126,6 @@ def create_upscale_tab(client: RunPodClient) -> None:
             # ------------------------------------------------------------------
             updated, result, msg = _upscale_tiles_batch(
                 tiles, None, orig_img,
-                loras,
                 g_prompt, neg_prompt,
                 tile_size, overlap,
                 strength, int(steps), cfg, int(seed),
@@ -1241,7 +1176,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
                                 "image_b64": _pil_to_b64(tile_img),
                                 "prompt_override": None,
                                 "model": ACTIVE_MODEL,
-                                "loras": loras if loras else [],
+                                "loras": HARDCODED_LORAS,
                                 "global_prompt": g_prompt,
                                 "negative_prompt": neg_prompt,
                                 "controlnet_enabled": cn_enabled,
@@ -1306,7 +1241,6 @@ def create_upscale_tab(client: RunPodClient) -> None:
             fn=on_upscale_all,
             inputs=[
                 tiles_state, original_img_state,
-                loras_state,
                 global_prompt, negative_prompt,
                 tile_size_num, overlap_num,
                 strength_sl, steps_sl, cfg_sl, seed_num,
@@ -1324,7 +1258,6 @@ def create_upscale_tab(client: RunPodClient) -> None:
         # ----------------------------------------------------------------
         def on_upscale_selected(
             tiles, selected_idx, orig_img,
-            loras,
             g_prompt, neg_prompt,
             ts, ov,
             strength, steps, cfg, seed,
@@ -1340,7 +1273,6 @@ def create_upscale_tab(client: RunPodClient) -> None:
             gen_res_val = _GEN_RES_LABEL_TO_VALUE.get(gen_res_label, 0)
             updated, result, msg = _upscale_tiles_batch(
                 tiles, [selected_idx], orig_img,
-                loras,
                 g_prompt, neg_prompt,
                 int(ts), int(ov),
                 strength, int(steps), cfg, int(seed),
@@ -1361,7 +1293,6 @@ def create_upscale_tab(client: RunPodClient) -> None:
             fn=on_upscale_selected,
             inputs=[
                 tiles_state, selected_idx_state, original_img_state,
-                loras_state,
                 global_prompt, negative_prompt,
                 tile_size_num, overlap_num,
                 strength_sl, steps_sl, cfg_sl, seed_num,
@@ -1385,4 +1316,50 @@ def create_upscale_tab(client: RunPodClient) -> None:
             fn=on_caption_all,
             inputs=[tiles_state, global_prompt, full_image_b64_state, original_img_state],
             outputs=[tiles_state, tile_grid_html, status_text],
+        )
+
+        # ----------------------------------------------------------------
+        # Auto-caption selected tile
+        # ----------------------------------------------------------------
+        def on_caption_selected(tiles, selected_idx, sys_prompt: str):
+            updated, caption_or_msg = _caption_selected_tile(selected_idx, tiles, sys_prompt, client)
+            # If captioning succeeded, caption_or_msg is the caption text; put it in the prompt box
+            if caption_or_msg.startswith("⚠️") or caption_or_msg.startswith("❌"):
+                return updated, caption_or_msg, gr.update()
+            return updated, f"✅ Captioned tile {selected_idx}.", caption_or_msg
+
+        caption_sel_btn.click(
+            fn=on_caption_selected,
+            inputs=[tiles_state, selected_idx_state, global_prompt],
+            outputs=[tiles_state, status_text, tile_prompt_box],
+        )
+
+        # ----------------------------------------------------------------
+        # Download Result
+        # ----------------------------------------------------------------
+        def on_download_result(result_img: Optional[Image.Image]):
+            if result_img is None:
+                return None
+            import tempfile
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            result_img.save(tmp.name, format="PNG")
+            tmp.close()
+            return tmp.name
+
+        download_btn.click(
+            fn=on_download_result,
+            inputs=[result_image],
+            outputs=[download_file],
+        )
+
+        # ----------------------------------------------------------------
+        # Copy Output → Input
+        # ----------------------------------------------------------------
+        def on_copy_to_input(result_img: Optional[Image.Image]):
+            return result_img
+
+        copy_to_input_btn.click(
+            fn=on_copy_to_input,
+            inputs=[result_image],
+            outputs=[image_input],
         )

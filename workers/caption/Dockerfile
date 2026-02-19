@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Install Python dependencies first (for layer caching)
-COPY requirements.txt .
+COPY workers/caption/requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
@@ -43,7 +43,7 @@ RUN mkdir -p /app/models/qwen3-vl-2b && \
     echo "Qwen3-VL-2B-Instruct downloaded successfully ($(du -sh model.safetensors | cut -f1))"
 
 # Copy application code (last for fast rebuilds)
-COPY . /app/
+COPY workers/caption/ /app/
 
 RUN chmod +x /app/start.sh
 

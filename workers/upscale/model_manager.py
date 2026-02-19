@@ -53,6 +53,80 @@ CONTROLNET_MODELS: dict[str, str] = {
     "sdxl-tile": CONTROLNET_TILE_PATH,
 }
 
+# ---------------------------------------------------------------------------
+# Hardcoded CivitAI LoRAs
+# Maps short name → CivitAI model version ID
+# ---------------------------------------------------------------------------
+HARDCODED_LORAS: dict[str, int] = {
+    "lora_929497": 2247497,
+    "lora_100435": 1096293,
+    "lora_1231943": 1736373,
+}
+
+
+def ensure_loras_downloaded() -> None:
+    """
+    Download the hardcoded CivitAI LoRAs into LORAS_DIR if they are not
+    already present.
+
+    Reads ``CIVITAI_API_TOKEN`` from the environment.  If the token is
+    missing or a download fails the function logs a warning and continues
+    rather than raising an exception.
+    """
+    import requests  # already in requirements
+
+    token = os.environ.get("CIVITAI_API_TOKEN", "")
+    if not token:
+        logger.warning(
+            "CIVITAI_API_TOKEN is not set — hardcoded LoRAs will not be downloaded"
+        )
+
+    os.makedirs(LORAS_DIR, exist_ok=True)
+
+    for short_name, version_id in HARDCODED_LORAS.items():
+        dest_path = os.path.join(LORAS_DIR, f"{short_name}.safetensors")
+        if os.path.isfile(dest_path):
+            logger.info(
+                "LoRA '%s' already exists at '%s' — skipping download",
+                short_name, dest_path,
+            )
+            continue
+
+        if not token:
+            logger.warning(
+                "Skipping download of LoRA '%s' (version %s) — no API token",
+                short_name, version_id,
+            )
+            continue
+
+        url = f"https://civitai.com/api/download/models/{version_id}?token={token}"
+        logger.info(
+            "Downloading LoRA '%s' (version %s) from CivitAI → '%s'",
+            short_name, version_id, dest_path,
+        )
+        try:
+            response = requests.get(url, stream=True, allow_redirects=True, timeout=300)
+            response.raise_for_status()
+            with open(dest_path, "wb") as fh:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        fh.write(chunk)
+            logger.info(
+                "LoRA '%s' downloaded successfully (%d bytes)",
+                short_name, os.path.getsize(dest_path),
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(
+                "Failed to download LoRA '%s' (version %s): %s",
+                short_name, version_id, exc,
+            )
+            # Remove partial file if it exists
+            if os.path.isfile(dest_path):
+                try:
+                    os.remove(dest_path)
+                except OSError:
+                    pass
+
 
 class ModelManager:
     """
@@ -348,6 +422,15 @@ class ModelManager:
             path = os.path.join(LORAS_DIR, candidate)
             if os.path.isfile(path):
                 return path
+        # Also accept hardcoded LoRA short names
+        if lora_name in HARDCODED_LORAS:
+            hardcoded_path = os.path.join(LORAS_DIR, f"{lora_name}.safetensors")
+            if os.path.isfile(hardcoded_path):
+                return hardcoded_path
+            raise FileNotFoundError(
+                f"Hardcoded LoRA '{lora_name}' has not been downloaded yet. "
+                f"Run ensure_loras_downloaded() at startup."
+            )
         raise FileNotFoundError(
             f"LoRA '{lora_name}' not found in '{LORAS_DIR}'"
         )
@@ -367,7 +450,7 @@ class ModelManager:
         2. **Local diffusers directory** (contains ``model_index.json``) —
            loaded with ``from_pretrained()``.
         """
-        from diffusers import StableDiffusionXLImg2ImgPipeline
+        from diffusers import DPMSolverMultistepScheduler, StableDiffusionXLImg2ImgPipeline
 
         if model_path.endswith(".safetensors") and os.path.isfile(model_path):
             logger.info(
@@ -378,6 +461,11 @@ class ModelManager:
                 torch_dtype=torch.float16,
                 use_safetensors=True,
                 vae=self._load_vae(),
+            )
+            pipe.scheduler = DPMSolverMultistepScheduler.from_config(
+                pipe.scheduler.config,
+                algorithm_type="sde-dpmsolver++",
+                use_karras_sigmas=True,
             )
             # NOTE: enable_model_cpu_offload() manages device placement automatically.
             # Do NOT call pipe.to("cuda") before it — that would defeat CPU offloading
@@ -395,6 +483,11 @@ class ModelManager:
                 torch_dtype=torch.float16,
                 use_safetensors=True,
                 vae=self._load_vae(),
+            )
+            pipe.scheduler = DPMSolverMultistepScheduler.from_config(
+                pipe.scheduler.config,
+                algorithm_type="sde-dpmsolver++",
+                use_karras_sigmas=True,
             )
             pipe.enable_model_cpu_offload()
             return pipe

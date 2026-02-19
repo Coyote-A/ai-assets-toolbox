@@ -70,7 +70,7 @@ class SDXLPipeline:
             self._build_plain_pipeline()
 
     def _build_plain_pipeline(self) -> None:
-        from diffusers import StableDiffusionXLImg2ImgPipeline
+        from diffusers import DPMSolverMultistepScheduler, StableDiffusionXLImg2ImgPipeline
 
         logger.info("Building plain SDXL img2img pipeline from '%s'", self.model_path)
 
@@ -93,12 +93,18 @@ class SDXLPipeline:
                 variant="fp16",
             )
 
+        self._pipe.scheduler = DPMSolverMultistepScheduler.from_config(
+            self._pipe.scheduler.config,
+            algorithm_type="sde-dpmsolver++",
+            use_karras_sigmas=True,
+        )
         self._pipe.enable_model_cpu_offload()
         logger.info("SDXL plain pipeline ready")
 
     def _build_controlnet_pipeline(self) -> None:
         from diffusers import (
             ControlNetModel,
+            DPMSolverMultistepScheduler,
             StableDiffusionXLControlNetImg2ImgPipeline,
         )
 
@@ -140,6 +146,11 @@ class SDXLPipeline:
                 variant="fp16",
             )
 
+        self._pipe.scheduler = DPMSolverMultistepScheduler.from_config(
+            self._pipe.scheduler.config,
+            algorithm_type="sde-dpmsolver++",
+            use_karras_sigmas=True,
+        )
         self._pipe.enable_model_cpu_offload()
         logger.info("SDXL+ControlNet pipeline ready")
 

@@ -5,7 +5,6 @@ Tabs
 ----
 1. 🖼️ Tile Upscale        — main upscaling workflow
 2. 🎭 Spritesheet Animation — placeholder (coming soon)
-3. 🎛️ LoRA Manager         — upload / list / delete LoRAs on RunPod storage
 
 Usage
 -----
@@ -33,7 +32,6 @@ import config
 from api_client import RunPodClient
 from tabs.upscale_tab import create_upscale_tab
 from tabs.spritesheet_tab import create_spritesheet_tab
-from tabs.model_manager_tab import create_model_manager_tab
 
 # Re-export new config names for convenience
 from config import (  # noqa: F401
@@ -253,7 +251,6 @@ def build_app() -> gr.Blocks:
 
         create_upscale_tab(client)
         create_spritesheet_tab()
-        create_model_manager_tab(client)
 
     return demo
 

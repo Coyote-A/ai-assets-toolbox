@@ -35,6 +35,9 @@ ENV TRANSFORMERS_CACHE=/app/hf_cache
 # Network volume path (LoRAs, outputs, etc.)
 ENV RUNPOD_VOLUME_PATH=/runpod-volume
 
+# CivitAI API token — set at runtime via RunPod environment variables
+ENV CIVITAI_API_TOKEN=""
+
 # Ensure Python can find the worker modules
 ENV PYTHONPATH=/app
 

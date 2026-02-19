@@ -31,6 +31,17 @@ mkdir -p \
 echo "[start.sh] Directory structure ready"
 
 # ---------------------------------------------------------------------------
+# Download hardcoded CivitAI LoRAs (skips files that already exist)
+# ---------------------------------------------------------------------------
+echo "[start.sh] Downloading hardcoded CivitAI LoRAs (if not already present)..."
+python -c "
+import logging
+logging.basicConfig(level=logging.INFO, format='[lora-download] %(message)s')
+from model_manager import ensure_loras_downloaded
+ensure_loras_downloaded()
+" || echo "[start.sh] WARNING: LoRA download step encountered errors (continuing)"
+
+# ---------------------------------------------------------------------------
 # Log GPU info (informational)
 # ---------------------------------------------------------------------------
 if command -v nvidia-smi &>/dev/null; then

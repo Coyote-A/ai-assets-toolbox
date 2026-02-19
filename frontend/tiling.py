@@ -236,6 +236,59 @@ def _make_weight_map(h: int, w: int, overlap: int, tile_info: TileInfo, image_si
     return weight
 
 
+def generate_mask_blur_preview(
+    tile_image: Image.Image,
+    tile_info: TileInfo,
+    overlap: int,
+    img_width: int,
+    img_height: int,
+) -> Image.Image:
+    """
+    Generate a visualization of the feathering/blend zones for a tile.
+
+    Areas where the weight map is less than 1.0 (i.e. the feathered overlap
+    edges) are tinted with a semi-transparent orange-red overlay so the user
+    can see which parts of the tile will be blended with neighbouring tiles.
+
+    Args:
+        tile_image: The tile's PIL Image (original or processed).
+        tile_info:  TileInfo describing this tile's position in the full image.
+        overlap:    Overlap in pixels used when the tile grid was calculated.
+        img_width:  Full image width in pixels.
+        img_height: Full image height in pixels.
+
+    Returns:
+        A new PIL Image (RGBA converted to RGB) with the feather zones
+        highlighted as a semi-transparent orange-red tint.
+    """
+    tile_rgb = tile_image.convert("RGB")
+    w, h = tile_rgb.size
+
+    # Build the weight map for this tile
+    weight = _make_weight_map(h, w, overlap, tile_info, (img_width, img_height))
+
+    # Create the overlay: pixels where weight < 1.0 get an orange-red tint.
+    # The tint intensity is proportional to (1 - weight) so the centre
+    # (weight == 1.0) is untouched and the deepest feather zone is most vivid.
+    tile_arr = np.array(tile_rgb, dtype=np.float32)  # (h, w, 3)
+
+    # Feather mask: 1.0 where fully feathered, 0.0 where no feathering
+    feather_mask = (1.0 - weight)  # (h, w), range [0, 1]
+
+    # Orange-red tint colour (R=255, G=120, B=0)
+    tint_r = np.full((h, w), 255.0, dtype=np.float32)
+    tint_g = np.full((h, w), 120.0, dtype=np.float32)
+    tint_b = np.full((h, w), 0.0,   dtype=np.float32)
+    tint = np.stack([tint_r, tint_g, tint_b], axis=-1)  # (h, w, 3)
+
+    # Blend: result = tile * (1 - alpha) + tint * alpha
+    # where alpha = feather_mask * 0.55  (max 55% opacity at the deepest edge)
+    alpha = (feather_mask * 0.55)[:, :, np.newaxis]  # (h, w, 1)
+    result_arr = tile_arr * (1.0 - alpha) + tint * alpha
+    result_arr = np.clip(result_arr, 0, 255).astype(np.uint8)
+    return Image.fromarray(result_arr, mode="RGB")
+
+
 def blend_tiles(
     tiles: List[Tuple[TileInfo, Image.Image]],
     image_size: Tuple[int, int],
