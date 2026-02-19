@@ -202,26 +202,41 @@ class RunPodClient:
         self,
         tiles_b64: List[Dict[str, str]],
         system_prompt: Optional[str] = None,
+        batch_size: int = 4,
     ) -> List[Dict[str, str]]:
         """
         Send tiles for captioning via Qwen3-VL.
 
+        Tiles are sent in batches of *batch_size* to stay within RunPod's
+        20 MiB request-body limit (a 1024×1024 RGB tile is ~4 MB as base64,
+        so 4 tiles ≈ 16 MB — safely under the limit).
+
         Args:
-            tiles_b64: list of {"tile_id": str, "image_b64": str}
-            system_prompt: optional override for the.captioning system prompt
+            tiles_b64:    list of {"tile_id": str, "image_b64": str}
+            system_prompt: optional override for the captioning system prompt
+            batch_size:   number of tiles per request (default 4)
 
         Returns:
             list of {"tile_id": str, "caption": str}
         """
+        if not tiles_b64:
+            return []
+
         caption_params: Dict[str, Any] = {"max_tokens": 200}
         if system_prompt:
             caption_params["system_prompt"] = system_prompt
 
-        output = self.run_sync(
-            "caption",
-            {"tiles": tiles_b64, "caption_params": caption_params},
-        )
-        return output.get("captions", [])
+        all_captions: List[Dict[str, str]] = []
+
+        for start in range(0, len(tiles_b64), batch_size):
+            batch = tiles_b64[start : start + batch_size]
+            output = self.run_sync(
+                "caption",
+                {"tiles": batch, "caption_params": caption_params},
+            )
+            all_captions.extend(output.get("captions", []))
+
+        return all_captions
 
     def caption_regions(
         self,

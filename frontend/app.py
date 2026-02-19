@@ -67,31 +67,30 @@ footer { display: none !important; }
     color: #ffb060;
 }
 
-/* ── Tile grid (HTML/CSS/JS component) ───────────────────────────────────── */
+/* ── Tile grid (HTML/CSS component) ──────────────────────────────────────── */
 #tile-grid-container {
     width: 100%;
 }
-.tile-grid {
-    display: grid;
-    gap: 0;
+/* Container: full image as background, tiles are absolute overlays */
+.tile-grid-wrap {
+    position: relative;
     width: 100%;
     border-radius: 8px;
     overflow: hidden;
-    background: #000;
-}
-.tile-grid .tile {
-    position: relative;
-    aspect-ratio: 1 / 1;
+    background-size: 100% 100%;
     background-repeat: no-repeat;
-    border: none;
-    border-radius: 0;
+}
+.tile-grid-wrap .tile {
+    position: absolute;
     cursor: pointer;
     overflow: hidden;
     box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12);
     transition: box-shadow 0.15s ease;
+    background-repeat: no-repeat;
+    background-size: 100% 100%;
 }
 /* Selection dimming */
-.tile-grid.has-selection .tile:not(.selected)::before {
+.tile-grid-wrap.has-selection .tile:not(.selected)::before {
     content: '';
     position: absolute;
     inset: 0;
@@ -100,12 +99,12 @@ footer { display: none !important; }
     z-index: 2;
     transition: background 0.15s ease;
 }
-.tile-grid .tile.selected {
+.tile-grid-wrap .tile.selected {
     z-index: 3;
     box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12),
                 inset 0 0 0 2px rgba(30, 111, 255, 0.8);
 }
-.tile-grid .tile[data-status=processed]::after {
+.tile-grid-wrap .tile[data-status=processed]::after {
     content: '';
     position: absolute;
     inset: 0;
@@ -113,18 +112,18 @@ footer { display: none !important; }
     pointer-events: none;
     z-index: 1;
 }
-.tile-grid .tile[data-status=processing] {
+.tile-grid-wrap .tile[data-status=processing] {
     animation: tile-pulse 1.2s ease-in-out infinite;
 }
 @keyframes tile-pulse {
     0%, 100% { box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.12), 0 0 0 0 rgba(255, 167, 38, 0.4); }
     50%       { box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.12), 0 0 0 4px rgba(255, 167, 38, 0); }
 }
-.tile-grid .tile:hover {
+.tile-grid-wrap .tile:hover {
     box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12),
                 inset 0 0 0 1.5px rgba(74, 128, 255, 0.6);
 }
-.tile-grid .tile-label {
+.tile-grid-wrap .tile-label {
     position: absolute;
     top: 3px;
     left: 3px;
@@ -137,7 +136,7 @@ footer { display: none !important; }
     font-family: monospace;
     z-index: 5;
 }
-.tile-grid .tile-status-icon {
+.tile-grid-wrap .tile-status-icon {
     position: absolute;
     bottom: 3px;
     right: 3px;
@@ -145,33 +144,33 @@ footer { display: none !important; }
     pointer-events: none;
     z-index: 5;
 }
-.tile-grid .tile[data-status=processed] .tile-status-icon::after {
+.tile-grid-wrap .tile[data-status=processed] .tile-status-icon::after {
     content: '✓';
     color: #00c853;
     text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
 }
-.tile-grid .tile[data-status=processing] .tile-status-icon::after { content: '⏳'; }
+.tile-grid-wrap .tile[data-status=processing] .tile-status-icon::after { content: '⏳'; }
 /* Overlap zone strips */
-.tile-grid .tile .overlap-zone {
+.tile-grid-wrap .tile .overlap-zone {
     position: absolute;
     pointer-events: none;
     z-index: 4;
     display: none;
 }
-.tile-grid .tile.selected .overlap-zone { display: block; }
-.tile-grid .tile .overlap-zone.left {
+.tile-grid-wrap .tile.selected .overlap-zone { display: block; }
+.tile-grid-wrap .tile .overlap-zone.left {
     left: 0; top: 0; bottom: 0;
     background: linear-gradient(to right, rgba(255, 165, 0, 0.35), transparent);
 }
-.tile-grid .tile .overlap-zone.right {
+.tile-grid-wrap .tile .overlap-zone.right {
     right: 0; top: 0; bottom: 0;
     background: linear-gradient(to left, rgba(255, 165, 0, 0.35), transparent);
 }
-.tile-grid .tile .overlap-zone.top {
+.tile-grid-wrap .tile .overlap-zone.top {
     left: 0; right: 0; top: 0;
     background: linear-gradient(to bottom, rgba(255, 165, 0, 0.35), transparent);
 }
-.tile-grid .tile .overlap-zone.bottom {
+.tile-grid-wrap .tile .overlap-zone.bottom {
     left: 0; right: 0; bottom: 0;
     background: linear-gradient(to top, rgba(255, 165, 0, 0.35), transparent);
 }
@@ -216,7 +215,7 @@ footer { display: none !important; }
 /* ── Responsive: narrow screens ─────────────────────────────────────────── */
 @media (max-width: 900px) {
     .gradio-container { max-width: 100%; padding: 0 8px; }
-    .tile-grid .tile-label { font-size: 9px; }
+    .tile-grid-wrap .tile-label { font-size: 9px; }
 }
 """
 

@@ -64,19 +64,20 @@ def _b64_to_pil(b64: str) -> Image.Image:
 # ---------------------------------------------------------------------------
 
 RESOLUTION_PRESETS = [
-    "8K × 8K (8192×8192)",
-    "8K × 4K (8192×4096)",
-    "4K × 4K (4096×4096)",
-    "4K × 2K (4096×2048)",
-    "Custom W×H",
+    "8192 (8K)",
+    "4096 (4K)",
+    "2048 (2K)",
+    "1024",
+    "Same as original",
 ]
 
-# Resolution preset values
-RESOLUTION_VALUES = {
-    "8K × 8K (8192×8192)": (8192, 8192),
-    "8K × 4K (8192×4096)": (8192, 4096),
-    "4K × 4K (4096×4096)": (4096, 4096),
-    "4K × 2K (4096×2048)": (4096, 2048),
+# Map label → long-side pixel value (None = keep original)
+RESOLUTION_LONG_SIDE: Dict[str, Optional[int]] = {
+    "8192 (8K)": 8192,
+    "4096 (4K)": 4096,
+    "2048 (2K)": 2048,
+    "1024": 1024,
+    "Same as original": None,
 }
 
 # The single active model (hardcoded — only illustrious-xl is supported)
@@ -96,12 +97,25 @@ _GEN_RES_LABELS = [label for label, _ in GENERATION_RES_CHOICES]
 def _compute_target_size(
     original_size: Tuple[int, int],
     resolution_choice: str,
-    custom_w: int,
-    custom_h: int,
 ) -> Tuple[int, int]:
-    if resolution_choice in RESOLUTION_VALUES:
-        return RESOLUTION_VALUES[resolution_choice]
-    return int(custom_w), int(custom_h)
+    """Compute target (width, height) from the long-side resolution preset.
+
+    The shorter side is scaled proportionally to preserve the original aspect
+    ratio.  If the preset is "Same as original", the original size is returned
+    unchanged.
+    """
+    orig_w, orig_h = original_size
+    long_side = RESOLUTION_LONG_SIDE.get(resolution_choice)
+    if long_side is None:
+        # "Same as original" — no upscale
+        return orig_w, orig_h
+    if orig_w >= orig_h:
+        target_w = long_side
+        target_h = max(1, int(orig_h * long_side / orig_w))
+    else:
+        target_h = long_side
+        target_w = max(1, int(orig_w * long_side / orig_h))
+    return target_w, target_h
 
 
 # ---------------------------------------------------------------------------
@@ -132,29 +146,27 @@ def _encode_grid_image(img: Image.Image, max_side: int = 2048, quality: int = 75
 
 _TILE_GRID_CSS = """
 <style>
-.tile-grid {
-  display: grid;
-  gap: 0;
+/* ── Grid container: full image as background, tiles are absolute overlays ── */
+.tile-grid-wrap {
+  position: relative;
   width: 100%;
   border-radius: 8px;
   overflow: hidden;
-  background: #000;
-}
-.tile {
-  position: relative;
-  aspect-ratio: 1 / 1;
+  background-size: 100% 100%;
   background-repeat: no-repeat;
-  border: none;
-  border-radius: 0;
+}
+/* ── Individual tile: absolute overlay ───────────────────────────────────── */
+.tile {
+  position: absolute;
   cursor: pointer;
   overflow: hidden;
-  /* Thin semi-transparent grid line overlay via inset box-shadow */
   box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12);
   transition: box-shadow 0.15s ease;
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
 }
-/* ── Selection dimming ─────────────────────────────────────────────────── */
-/* When any tile is selected, dim all non-selected tiles */
-.tile-grid.has-selection .tile:not(.selected)::before {
+/* ── Selection dimming ────────────────────────────────────────────────────── */
+.tile-grid-wrap.has-selection .tile:not(.selected)::before {
   content: '';
   position: absolute;
   inset: 0;
@@ -163,13 +175,12 @@ _TILE_GRID_CSS = """
   z-index: 2;
   transition: background 0.15s ease;
 }
-/* Selected tile stays bright and on top */
-.tile-grid .tile.selected {
+.tile.selected {
   z-index: 3;
   box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12),
               inset 0 0 0 2px rgba(30, 111, 255, 0.8);
 }
-/* ── Status indicators ─────────────────────────────────────────────────── */
+/* ── Status indicators ────────────────────────────────────────────────────── */
 .tile[data-status=processed]::after {
   content: '';
   position: absolute;
@@ -189,7 +200,7 @@ _TILE_GRID_CSS = """
   box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12),
               inset 0 0 0 1.5px rgba(74, 128, 255, 0.6);
 }
-/* ── Tile labels & icons ───────────────────────────────────────────────── */
+/* ── Tile labels & icons ──────────────────────────────────────────────────── */
 .tile-label {
   position: absolute;
   top: 3px;
@@ -217,38 +228,28 @@ _TILE_GRID_CSS = """
   text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
 }
 .tile[data-status=processing] .tile-status-icon::after { content: '\u23f3'; }
-/* ── Overlap zone strips ───────────────────────────────────────────────── */
+/* ── Overlap zone strips ──────────────────────────────────────────────────── */
 .tile .overlap-zone {
   position: absolute;
   pointer-events: none;
   z-index: 4;
   display: none;
 }
-.tile.selected .overlap-zone {
-  display: block;
-}
+.tile.selected .overlap-zone { display: block; }
 .tile .overlap-zone.left {
-  left: 0;
-  top: 0;
-  bottom: 0;
+  left: 0; top: 0; bottom: 0;
   background: linear-gradient(to right, rgba(255, 165, 0, 0.35), transparent);
 }
 .tile .overlap-zone.right {
-  right: 0;
-  top: 0;
-  bottom: 0;
+  right: 0; top: 0; bottom: 0;
   background: linear-gradient(to left, rgba(255, 165, 0, 0.35), transparent);
 }
 .tile .overlap-zone.top {
-  left: 0;
-  right: 0;
-  top: 0;
+  left: 0; right: 0; top: 0;
   background: linear-gradient(to bottom, rgba(255, 165, 0, 0.35), transparent);
 }
 .tile .overlap-zone.bottom {
-  left: 0;
-  right: 0;
-  bottom: 0;
+  left: 0; right: 0; bottom: 0;
   background: linear-gradient(to top, rgba(255, 165, 0, 0.35), transparent);
 }
 @media (max-width: 900px) {
@@ -257,58 +258,28 @@ _TILE_GRID_CSS = """
 </style>
 """
 
-_TILE_GRID_JS = """
-<script>
-(function() {
-  var root = document.getElementById('tile-grid-root');
-  if (!root) return;
-
-  var grid = root.querySelector('.tile-grid');
-  var tiles = root.querySelectorAll('.tile');
-  var selectedIdx = parseInt(root.dataset.selected, 10);
-
-  // Apply selected class and has-selection from server-side state
-  tiles.forEach(function(tile) {
-    tile.classList.toggle('selected', parseInt(tile.dataset.idx, 10) === selectedIdx);
-  });
-  if (selectedIdx >= 0 && grid) {
-    grid.classList.add('has-selection');
-  }
-
-  // Click handler — write to hidden textbox to notify Python
-  root.addEventListener('click', function(e) {
-    var tileEl = e.target.closest('.tile');
-    if (!tileEl) return;
-
-    var idx = parseInt(tileEl.dataset.idx, 10);
-    var wasSelected = tileEl.classList.contains('selected');
-
-    // Update visual selection immediately (no round-trip needed)
-    tiles.forEach(function(t) { t.classList.remove('selected'); });
-
-    if (wasSelected) {
-      // Deselect: click same tile again
-      if (grid) grid.classList.remove('has-selection');
-      idx = -1;
-    } else {
-      tileEl.classList.add('selected');
-      if (grid) grid.classList.add('has-selection');
-    }
-
-    // Write to hidden Gradio textbox to trigger Python .change() handler
-    var hiddenInput = document.querySelector('#tile-selected-idx textarea');
-    if (hiddenInput) {
-      var nativeInputValueSetter =
-        Object.getOwnPropertyDescriptor(
-          window.HTMLTextAreaElement.prototype, 'value'
-        ).set;
-      nativeInputValueSetter.call(hiddenInput, String(idx));
-      hiddenInput.dispatchEvent(new Event('input', { bubbles: true }));
-    }
-  });
-})();
-</script>
-"""
+# Inline onclick JS template — embedded directly on each tile div so it fires
+# reliably even after Gradio re-renders gr.HTML (Gradio does NOT re-execute
+# <script> blocks on HTML updates).
+_TILE_ONCLICK_JS = (
+    "(function(el){"
+    "var wrap=el.closest('.tile-grid-wrap');"
+    "var wasSelected=el.classList.contains('selected');"
+    "wrap&&wrap.querySelectorAll('.tile').forEach(function(t){t.classList.remove('selected');});"
+    "if(wasSelected){"
+    "wrap&&wrap.classList.remove('has-selection');"
+    "}else{"
+    "el.classList.add('selected');"
+    "wrap&&wrap.classList.add('has-selection');"
+    "}"
+    "var tb=document.querySelector('#tile-selected-idx textarea');"
+    "if(tb){"
+    "var ns=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set;"
+    "ns.call(tb,wasSelected?'-1':el.dataset.idx);"
+    "tb.dispatchEvent(new Event('input',{bubbles:true}));"
+    "}"
+    "})(this)"
+)
 
 
 def _build_tile_grid_html(
@@ -319,7 +290,20 @@ def _build_tile_grid_html(
     img_h: int,
     overlap: int = 128,
 ) -> str:
-    """Build the HTML/CSS/JS string for the custom tile grid component.
+    """Build the HTML/CSS string for the custom tile grid component.
+
+    Layout strategy (Bug 2 + Bug 4 fix):
+    - The container div (.tile-grid-wrap) has the full image as its CSS
+      background-image with background-size: 100% 100%.  Its height is set
+      via padding-bottom to preserve the image aspect ratio.
+    - Each tile div is position:absolute with left/top/width/height expressed
+      as percentages of the container, derived directly from the tile's pixel
+      coordinates in the display image.  This is pixel-perfect and handles
+      non-square edge tiles automatically.
+    - Processed tiles get their own background-image (background-size: 100% 100%)
+      which covers only that tile's area.
+    - Inline onclick handlers (Bug 3 fix) are embedded on each tile div so
+      they fire reliably even after Gradio re-renders gr.HTML.
 
     Args:
         tiles_data: List of tile dicts with 'info' (TileInfo), 'processed_b64' (optional).
@@ -331,7 +315,7 @@ def _build_tile_grid_html(
         overlap: Overlap in original image pixels (used for overlap zone visualization)
 
     Returns:
-        HTML string with embedded CSS and JS
+        HTML string with embedded CSS
     """
     if not tiles_data:
         return "<p style='color:#888; padding:16px;'>Upload an image to see the tile grid.</p>"
@@ -342,6 +326,10 @@ def _build_tile_grid_html(
 
     has_selection_class = " has-selection" if selected_idx >= 0 else ""
 
+    # padding-bottom trick: makes the container maintain the image aspect ratio
+    # while width: 100% fills the available space.
+    padding_bottom_pct = (img_h / img_w * 100) if img_w > 0 else 100.0
+
     tile_divs = []
     for i, tile in enumerate(tiles_data):
         ti: TileInfo = tile["info"]
@@ -349,41 +337,34 @@ def _build_tile_grid_html(
         status = "processed" if is_processed else "default"
         selected_class = " selected" if i == selected_idx else ""
 
+        # Absolute position as % of container (= % of display image dimensions)
+        left_pct   = ti.x / img_w * 100 if img_w > 0 else 0.0
+        top_pct    = ti.y / img_h * 100 if img_h > 0 else 0.0
+        width_pct  = ti.w / img_w * 100 if img_w > 0 else 100.0
+        height_pct = ti.h / img_h * 100 if img_h > 0 else 100.0
+
+        pos_style = (
+            f"left:{left_pct:.4f}%;top:{top_pct:.4f}%;"
+            f"width:{width_pct:.4f}%;height:{height_pct:.4f}%;"
+        )
+
         if is_processed and tile.get("processed_b64"):
-            # Show the processed tile image directly as background (full tile fill)
+            # Processed tile: show its own image filling the tile area exactly
             proc_b64 = tile["processed_b64"]
             bg_style = (
-                f"background-image: url('data:image/jpeg;base64,{proc_b64}');"
-                "background-size: 100% 100%;"
-                "background-position: 0% 0%;"
+                f"background-image:url('data:image/jpeg;base64,{proc_b64}');"
+                "background-size:100% 100%;"
             )
         else:
-            # Crop the full image using CSS background-position math.
-            # background-size: (img_w / tile_w * 100)% (img_h / tile_h * 100)%
-            # background-position: (x / (img_w - tile_w) * 100)% (y / (img_h - tile_h) * 100)%
-            tile_w = ti.w
-            tile_h = ti.h
-
-            bg_size_x = img_w / tile_w * 100 if tile_w > 0 else 100
-            bg_size_y = img_h / tile_h * 100 if tile_h > 0 else 100
-
-            bp_x = ti.x / (img_w - tile_w) * 100 if img_w > tile_w else 0.0
-            bp_y = ti.y / (img_h - tile_h) * 100 if img_h > tile_h else 0.0
-
-            bg_style = (
-                f"background-image: url('data:image/jpeg;base64,{full_image_b64}');"
-                f"background-size: {bg_size_x:.4f}% {bg_size_y:.4f}%;"
-                f"background-position: {bp_x:.4f}% {bp_y:.4f}%;"
-            )
+            # Unprocessed tile: transparent — the container background shows through
+            bg_style = ""
 
         label = f"{ti.row},{ti.col}"
 
-        # Compute overlap zone widths as percentage of tile display size
-        # overlap is in original image pixels; tile display size is ti.w / ti.h pixels
+        # Overlap zone widths as % of this tile's own dimensions
         overlap_pct_x = (overlap / ti.w * 100) if ti.w > 0 else 0.0
         overlap_pct_y = (overlap / ti.h * 100) if ti.h > 0 else 0.0
 
-        # Build overlap zone divs (shown only when tile is selected)
         overlap_divs = []
         if ti.col > 0:
             overlap_divs.append(
@@ -408,7 +389,8 @@ def _build_tile_grid_html(
             f'data-idx="{i}" data-row="{ti.row}" data-col="{ti.col}" '
             f'data-total-rows="{grid_rows}" data-total-cols="{grid_cols}" '
             f'data-status="{status}" '
-            f'style="{bg_style}">'
+            f'onclick="{_TILE_ONCLICK_JS}" '
+            f'style="{pos_style}{bg_style}">'
             f'<span class="tile-label">{label}</span>'
             f'<span class="tile-status-icon"></span>'
             f'{overlap_html}'
@@ -416,21 +398,17 @@ def _build_tile_grid_html(
         )
 
     tiles_html = "\n".join(tile_divs)
-    aspect = f"{img_w} / {img_h}"
 
+    # Container: full image as background, padding-bottom preserves aspect ratio.
+    # The inner div is position:absolute inset:0 to give tiles a positioned parent.
     html = (
-        f'<div id="tile-grid-root" '
-        f'data-rows="{grid_rows}" data-cols="{grid_cols}" '
-        f'data-img-w="{img_w}" data-img-h="{img_h}" '
-        f'data-selected="{selected_idx}" '
-        f'data-overlap="{overlap}">'
-        f'<div class="tile-grid{has_selection_class}" '
-        f'style="grid-template-columns: repeat({grid_cols}, 1fr); aspect-ratio: {aspect};">'
+        f'<div class="tile-grid-wrap{has_selection_class}" '
+        f'style="'
+        f'padding-bottom:{padding_bottom_pct:.4f}%;'
+        f'background-image:url(\'data:image/jpeg;base64,{full_image_b64}\');">'
         f'{tiles_html}'
         f'</div>'
-        f'</div>'
         f'{_TILE_GRID_CSS}'
-        f'{_TILE_GRID_JS}'
     )
     return html
 
@@ -486,8 +464,6 @@ def _scale_tiles_for_display(
 def _on_image_upload(
     image: Optional[Image.Image],
     resolution_choice: str,
-    custom_w: int,
-    custom_h: int,
     tile_size: int,
     overlap: int,
 ) -> Tuple[
@@ -504,7 +480,7 @@ def _on_image_upload(
     if image is None:
         return [], -1, None, 1, "", _empty_html, "No image uploaded."
 
-    target_w, target_h = _compute_target_size(image.size, resolution_choice, custom_w, custom_h)
+    target_w, target_h = _compute_target_size(image.size, resolution_choice)
     target_w = min(target_w, config.MAX_RESOLUTION)
     target_h = min(target_h, config.MAX_RESOLUTION)
 
@@ -801,19 +777,13 @@ def create_upscale_tab(client: RunPodClient) -> None:
             with gr.Column(scale=2):
                 resolution_dd = gr.Dropdown(
                     choices=RESOLUTION_PRESETS,
-                    value="4K × 4K (4096×4096)",
-                    label="Target Resolution",
-                    info="The image will be upscaled to this resolution before tiling.",
+                    value="4096 (4K)",
+                    label="Target Resolution (longer side)",
+                    info=(
+                        "The image's longer side will be scaled to this value. "
+                        "The shorter side is calculated automatically to preserve the original aspect ratio."
+                    ),
                 )
-                with gr.Row():
-                    custom_w = gr.Number(
-                        value=2048, label="Width (px)", precision=0,
-                        visible=False, scale=1,
-                    )
-                    custom_h = gr.Number(
-                        value=2048, label="Height (px)", precision=0,
-                        visible=False, scale=1,
-                    )
                 regen_grid_btn = gr.Button("🔄 Regenerate Grid", variant="secondary", size="sm")
 
         status_text = gr.Textbox(
@@ -1063,23 +1033,10 @@ def create_upscale_tab(client: RunPodClient) -> None:
         # ================================================================
 
         # ----------------------------------------------------------------
-        # Show/hide custom resolution fields
-        # ----------------------------------------------------------------
-        def _toggle_custom(choice: str):
-            visible = choice == "Custom W×H"
-            return gr.update(visible=visible), gr.update(visible=visible)
-
-        resolution_dd.change(
-            fn=_toggle_custom,
-            inputs=[resolution_dd],
-            outputs=[custom_w, custom_h],
-        )
-
-        # ----------------------------------------------------------------
         # Image upload → calculate tiles → build HTML tile grid
         # ----------------------------------------------------------------
-        def on_upload(img, res, cw, ch, ts, ov):
-            return _on_image_upload(img, res, cw, ch, int(ts), int(ov))
+        def on_upload(img, res, ts, ov):
+            return _on_image_upload(img, res, int(ts), int(ov))
 
         _upload_outputs = [
             tiles_state, selected_idx_state, original_img_state,
@@ -1089,20 +1046,20 @@ def create_upscale_tab(client: RunPodClient) -> None:
 
         image_input.upload(
             fn=on_upload,
-            inputs=[image_input, resolution_dd, custom_w, custom_h, tile_size_num, overlap_num],
+            inputs=[image_input, resolution_dd, tile_size_num, overlap_num],
             outputs=_upload_outputs,
         )
 
         image_input.change(
             fn=on_upload,
-            inputs=[image_input, resolution_dd, custom_w, custom_h, tile_size_num, overlap_num],
+            inputs=[image_input, resolution_dd, tile_size_num, overlap_num],
             outputs=_upload_outputs,
         )
 
         # Regenerate grid button (re-runs the same upload logic)
         regen_grid_btn.click(
             fn=on_upload,
-            inputs=[image_input, resolution_dd, custom_w, custom_h, tile_size_num, overlap_num],
+            inputs=[image_input, resolution_dd, tile_size_num, overlap_num],
             outputs=_upload_outputs,
         )
 
