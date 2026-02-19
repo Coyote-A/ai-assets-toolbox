@@ -1,6 +1,6 @@
 runpod
 torch>=2.2.0
-transformers>=4.51.0
+transformers>=4.53.0
 accelerate>=0.30.0
 safetensors>=0.4.0
 Pillow>=10.0.0

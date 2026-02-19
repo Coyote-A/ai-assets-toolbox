@@ -171,9 +171,19 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
 if __name__ == "__main__":
     logger.info("Starting RunPod caption worker")
 
-    # Preload the Qwen model at startup so the first request is fast
+    # Preload the Qwen model at startup so the first request is fast.
+    # Wrapped in try/except so startup failures are logged clearly before exit.
     logger.info("Preloading Qwen3-VL-2B model...")
-    _get_pipeline()
-    logger.info("Model preloaded, ready for jobs")
+    try:
+        _get_pipeline()
+        logger.info("Model preloaded successfully, ready for jobs")
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.critical(
+            "FATAL: Model preload failed — worker cannot start.\n"
+            "Exception: %s\n%s",
+            exc,
+            traceback.format_exc(),
+        )
+        raise SystemExit(1) from exc
 
     runpod.serverless.start({"handler": handler})
