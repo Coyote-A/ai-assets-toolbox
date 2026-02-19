@@ -134,45 +134,62 @@ _TILE_GRID_CSS = """
 <style>
 .tile-grid {
   display: grid;
-  gap: 2px;
+  gap: 0;
   width: 100%;
   border-radius: 8px;
   overflow: hidden;
-  background: #1a1b2e;
+  background: #000;
 }
 .tile {
   position: relative;
   aspect-ratio: 1 / 1;
   background-repeat: no-repeat;
-  border: 2px solid transparent;
-  border-radius: 4px;
+  border: none;
+  border-radius: 0;
   cursor: pointer;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
   overflow: hidden;
+  /* Thin semi-transparent grid line overlay via inset box-shadow */
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12);
+  transition: box-shadow 0.15s ease;
 }
-.tile[data-status=default] { border-color: #333; }
-.tile.selected {
-  border-color: #1e6fff;
-  box-shadow: 0 0 0 2px rgba(30, 111, 255, 0.35);
-  z-index: 1;
+/* ── Selection dimming ─────────────────────────────────────────────────── */
+/* When any tile is selected, dim all non-selected tiles */
+.tile-grid.has-selection .tile:not(.selected)::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+  z-index: 2;
+  transition: background 0.15s ease;
 }
-.tile[data-status=processed] { border-color: #00c853; }
+/* Selected tile stays bright and on top */
+.tile-grid .tile.selected {
+  z-index: 3;
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12),
+              inset 0 0 0 2px rgba(30, 111, 255, 0.8);
+}
+/* ── Status indicators ─────────────────────────────────────────────────── */
 .tile[data-status=processed]::after {
   content: '';
   position: absolute;
   inset: 0;
   background: rgba(0, 200, 80, 0.08);
   pointer-events: none;
+  z-index: 1;
 }
 .tile[data-status=processing] {
-  border-color: #ffa726;
   animation: tile-pulse 1.2s ease-in-out infinite;
 }
 @keyframes tile-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 167, 38, 0.4); }
-  50%       { box-shadow: 0 0 0 6px rgba(255, 167, 38, 0); }
+  0%, 100% { box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.12), 0 0 0 0 rgba(255, 167, 38, 0.4); }
+  50%       { box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.12), 0 0 0 4px rgba(255, 167, 38, 0); }
 }
-.tile:hover { border-color: #4a80ff; }
+.tile:hover {
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12),
+              inset 0 0 0 1.5px rgba(74, 128, 255, 0.6);
+}
+/* ── Tile labels & icons ───────────────────────────────────────────────── */
 .tile-label {
   position: absolute;
   top: 3px;
@@ -184,6 +201,7 @@ _TILE_GRID_CSS = """
   border-radius: 3px;
   pointer-events: none;
   font-family: monospace;
+  z-index: 5;
 }
 .tile-status-icon {
   position: absolute;
@@ -191,6 +209,7 @@ _TILE_GRID_CSS = """
   right: 3px;
   font-size: 14px;
   pointer-events: none;
+  z-index: 5;
 }
 .tile[data-status=processed] .tile-status-icon::after {
   content: '\u2713';
@@ -198,8 +217,41 @@ _TILE_GRID_CSS = """
   text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
 }
 .tile[data-status=processing] .tile-status-icon::after { content: '\u23f3'; }
+/* ── Overlap zone strips ───────────────────────────────────────────────── */
+.tile .overlap-zone {
+  position: absolute;
+  pointer-events: none;
+  z-index: 4;
+  display: none;
+}
+.tile.selected .overlap-zone {
+  display: block;
+}
+.tile .overlap-zone.left {
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: linear-gradient(to right, rgba(255, 165, 0, 0.35), transparent);
+}
+.tile .overlap-zone.right {
+  right: 0;
+  top: 0;
+  bottom: 0;
+  background: linear-gradient(to left, rgba(255, 165, 0, 0.35), transparent);
+}
+.tile .overlap-zone.top {
+  left: 0;
+  right: 0;
+  top: 0;
+  background: linear-gradient(to bottom, rgba(255, 165, 0, 0.35), transparent);
+}
+.tile .overlap-zone.bottom {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(to top, rgba(255, 165, 0, 0.35), transparent);
+}
 @media (max-width: 900px) {
-  .tile-grid { gap: 1px; }
   .tile-label { font-size: 9px; }
 }
 </style>
@@ -211,13 +263,17 @@ _TILE_GRID_JS = """
   var root = document.getElementById('tile-grid-root');
   if (!root) return;
 
+  var grid = root.querySelector('.tile-grid');
   var tiles = root.querySelectorAll('.tile');
   var selectedIdx = parseInt(root.dataset.selected, 10);
 
-  // Apply selected class from server-side state
+  // Apply selected class and has-selection from server-side state
   tiles.forEach(function(tile) {
     tile.classList.toggle('selected', parseInt(tile.dataset.idx, 10) === selectedIdx);
   });
+  if (selectedIdx >= 0 && grid) {
+    grid.classList.add('has-selection');
+  }
 
   // Click handler — write to hidden textbox to notify Python
   root.addEventListener('click', function(e) {
@@ -225,10 +281,19 @@ _TILE_GRID_JS = """
     if (!tileEl) return;
 
     var idx = parseInt(tileEl.dataset.idx, 10);
+    var wasSelected = tileEl.classList.contains('selected');
 
     // Update visual selection immediately (no round-trip needed)
     tiles.forEach(function(t) { t.classList.remove('selected'); });
-    tileEl.classList.add('selected');
+
+    if (wasSelected) {
+      // Deselect: click same tile again
+      if (grid) grid.classList.remove('has-selection');
+      idx = -1;
+    } else {
+      tileEl.classList.add('selected');
+      if (grid) grid.classList.add('has-selection');
+    }
 
     // Write to hidden Gradio textbox to trigger Python .change() handler
     var hiddenInput = document.querySelector('#tile-selected-idx textarea');
@@ -252,6 +317,7 @@ def _build_tile_grid_html(
     selected_idx: int,
     img_w: int,
     img_h: int,
+    overlap: int = 128,
 ) -> str:
     """Build the HTML/CSS/JS string for the custom tile grid component.
 
@@ -262,6 +328,7 @@ def _build_tile_grid_html(
         selected_idx: Currently selected tile index (-1 for none)
         img_w: Full display image width in pixels
         img_h: Full display image height in pixels
+        overlap: Overlap in original image pixels (used for overlap zone visualization)
 
     Returns:
         HTML string with embedded CSS and JS
@@ -272,6 +339,8 @@ def _build_tile_grid_html(
     # Determine grid dimensions from tile infos
     grid_cols = max(t["info"].col for t in tiles_data) + 1
     grid_rows = max(t["info"].row for t in tiles_data) + 1
+
+    has_selection_class = " has-selection" if selected_idx >= 0 else ""
 
     tile_divs = []
     for i, tile in enumerate(tiles_data):
@@ -308,13 +377,41 @@ def _build_tile_grid_html(
             )
 
         label = f"{ti.row},{ti.col}"
+
+        # Compute overlap zone widths as percentage of tile display size
+        # overlap is in original image pixels; tile display size is ti.w / ti.h pixels
+        overlap_pct_x = (overlap / ti.w * 100) if ti.w > 0 else 0.0
+        overlap_pct_y = (overlap / ti.h * 100) if ti.h > 0 else 0.0
+
+        # Build overlap zone divs (shown only when tile is selected)
+        overlap_divs = []
+        if ti.col > 0:
+            overlap_divs.append(
+                f'<div class="overlap-zone left" style="width:{overlap_pct_x:.3f}%;"></div>'
+            )
+        if ti.col < grid_cols - 1:
+            overlap_divs.append(
+                f'<div class="overlap-zone right" style="width:{overlap_pct_x:.3f}%;"></div>'
+            )
+        if ti.row > 0:
+            overlap_divs.append(
+                f'<div class="overlap-zone top" style="height:{overlap_pct_y:.3f}%;"></div>'
+            )
+        if ti.row < grid_rows - 1:
+            overlap_divs.append(
+                f'<div class="overlap-zone bottom" style="height:{overlap_pct_y:.3f}%;"></div>'
+            )
+        overlap_html = "".join(overlap_divs)
+
         tile_divs.append(
             f'<div class="tile{selected_class}" '
             f'data-idx="{i}" data-row="{ti.row}" data-col="{ti.col}" '
+            f'data-total-rows="{grid_rows}" data-total-cols="{grid_cols}" '
             f'data-status="{status}" '
             f'style="{bg_style}">'
             f'<span class="tile-label">{label}</span>'
             f'<span class="tile-status-icon"></span>'
+            f'{overlap_html}'
             f'</div>'
         )
 
@@ -325,8 +422,9 @@ def _build_tile_grid_html(
         f'<div id="tile-grid-root" '
         f'data-rows="{grid_rows}" data-cols="{grid_cols}" '
         f'data-img-w="{img_w}" data-img-h="{img_h}" '
-        f'data-selected="{selected_idx}">'
-        f'<div class="tile-grid" '
+        f'data-selected="{selected_idx}" '
+        f'data-overlap="{overlap}">'
+        f'<div class="tile-grid{has_selection_class}" '
         f'style="grid-template-columns: repeat({grid_cols}, 1fr); aspect-ratio: {aspect};">'
         f'{tiles_html}'
         f'</div>'
@@ -430,7 +528,7 @@ def _on_image_upload(
     # Scale tile coords to display image space for CSS background-position math
     scaled_tiles = _scale_tiles_for_display(tiles_state, upscaled.width, upscaled.height, display_w, display_h)
 
-    grid_html = _build_tile_grid_html(scaled_tiles, full_image_b64, -1, display_w, display_h)
+    grid_html = _build_tile_grid_html(scaled_tiles, full_image_b64, -1, display_w, display_h, overlap)
 
     status = (
         f"✅ Image upscaled to {target_w}×{target_h}. "
@@ -445,6 +543,7 @@ def _rebuild_grid_html(
     full_image_b64: str,
     selected_idx: int,
     original_img: Optional[Image.Image],
+    overlap: int = 128,
 ) -> str:
     """Rebuild the tile grid HTML from current state.
 
@@ -457,7 +556,7 @@ def _rebuild_grid_html(
     orig_w, orig_h = original_img.size
     display_w, display_h = _compute_display_dims(orig_w, orig_h, max_side=2048)
     scaled_tiles = _scale_tiles_for_display(tiles_state, orig_w, orig_h, display_w, display_h)
-    return _build_tile_grid_html(scaled_tiles, full_image_b64, selected_idx, display_w, display_h)
+    return _build_tile_grid_html(scaled_tiles, full_image_b64, selected_idx, display_w, display_h, overlap)
 
 
 def _on_prompt_edit(

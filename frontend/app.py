@@ -73,45 +73,57 @@ footer { display: none !important; }
 }
 .tile-grid {
     display: grid;
-    gap: 2px;
+    gap: 0;
     width: 100%;
     border-radius: 8px;
     overflow: hidden;
-    background: #1a1b2e;
+    background: #000;
 }
 .tile-grid .tile {
     position: relative;
     aspect-ratio: 1 / 1;
     background-repeat: no-repeat;
-    border: 2px solid transparent;
-    border-radius: 4px;
+    border: none;
+    border-radius: 0;
     cursor: pointer;
-    transition: border-color 0.15s ease, box-shadow 0.15s ease;
     overflow: hidden;
+    box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12);
+    transition: box-shadow 0.15s ease;
 }
-.tile-grid .tile[data-status=default] { border-color: #333; }
+/* Selection dimming */
+.tile-grid.has-selection .tile:not(.selected)::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    pointer-events: none;
+    z-index: 2;
+    transition: background 0.15s ease;
+}
 .tile-grid .tile.selected {
-    border-color: #1e6fff;
-    box-shadow: 0 0 0 2px rgba(30, 111, 255, 0.35);
-    z-index: 1;
+    z-index: 3;
+    box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12),
+                inset 0 0 0 2px rgba(30, 111, 255, 0.8);
 }
-.tile-grid .tile[data-status=processed] { border-color: #00c853; }
 .tile-grid .tile[data-status=processed]::after {
     content: '';
     position: absolute;
     inset: 0;
     background: rgba(0, 200, 80, 0.08);
     pointer-events: none;
+    z-index: 1;
 }
 .tile-grid .tile[data-status=processing] {
-    border-color: #ffa726;
     animation: tile-pulse 1.2s ease-in-out infinite;
 }
 @keyframes tile-pulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(255, 167, 38, 0.4); }
-    50%       { box-shadow: 0 0 0 6px rgba(255, 167, 38, 0); }
+    0%, 100% { box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.12), 0 0 0 0 rgba(255, 167, 38, 0.4); }
+    50%       { box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.12), 0 0 0 4px rgba(255, 167, 38, 0); }
 }
-.tile-grid .tile:hover { border-color: #4a80ff; }
+.tile-grid .tile:hover {
+    box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12),
+                inset 0 0 0 1.5px rgba(74, 128, 255, 0.6);
+}
 .tile-grid .tile-label {
     position: absolute;
     top: 3px;
@@ -123,6 +135,7 @@ footer { display: none !important; }
     border-radius: 3px;
     pointer-events: none;
     font-family: monospace;
+    z-index: 5;
 }
 .tile-grid .tile-status-icon {
     position: absolute;
@@ -130,6 +143,7 @@ footer { display: none !important; }
     right: 3px;
     font-size: 14px;
     pointer-events: none;
+    z-index: 5;
 }
 .tile-grid .tile[data-status=processed] .tile-status-icon::after {
     content: '✓';
@@ -137,6 +151,30 @@ footer { display: none !important; }
     text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
 }
 .tile-grid .tile[data-status=processing] .tile-status-icon::after { content: '⏳'; }
+/* Overlap zone strips */
+.tile-grid .tile .overlap-zone {
+    position: absolute;
+    pointer-events: none;
+    z-index: 4;
+    display: none;
+}
+.tile-grid .tile.selected .overlap-zone { display: block; }
+.tile-grid .tile .overlap-zone.left {
+    left: 0; top: 0; bottom: 0;
+    background: linear-gradient(to right, rgba(255, 165, 0, 0.35), transparent);
+}
+.tile-grid .tile .overlap-zone.right {
+    right: 0; top: 0; bottom: 0;
+    background: linear-gradient(to left, rgba(255, 165, 0, 0.35), transparent);
+}
+.tile-grid .tile .overlap-zone.top {
+    left: 0; right: 0; top: 0;
+    background: linear-gradient(to bottom, rgba(255, 165, 0, 0.35), transparent);
+}
+.tile-grid .tile .overlap-zone.bottom {
+    left: 0; right: 0; bottom: 0;
+    background: linear-gradient(to top, rgba(255, 165, 0, 0.35), transparent);
+}
 
 /* ── Selected tile detail panel ──────────────────────────────────────────── */
 .selected-tile-panel {
@@ -178,7 +216,6 @@ footer { display: none !important; }
 /* ── Responsive: narrow screens ─────────────────────────────────────────── */
 @media (max-width: 900px) {
     .gradio-container { max-width: 100%; padding: 0 8px; }
-    .tile-grid { gap: 1px; }
     .tile-grid .tile-label { font-size: 9px; }
 }
 """
