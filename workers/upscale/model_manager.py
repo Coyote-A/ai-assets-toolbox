@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 MODELS_DIR = os.environ.get("MODELS_DIR", "/app/models")
 
-ILLUSTRIOUS_XL_PATH = os.path.join(MODELS_DIR, "illustrious-xl", "illustrious-xl-v2.0.safetensors")
+ILLUSTRIOUS_XL_PATH = os.path.join(MODELS_DIR, "illustrious-xl", "Illustrious-XL-v2.0.safetensors")
 CONTROLNET_TILE_PATH = os.path.join(MODELS_DIR, "controlnet-tile")
 SDXL_VAE_PATH = os.path.join(MODELS_DIR, "sdxl-vae")
 IP_ADAPTER_PATH = os.path.join(MODELS_DIR, "ip-adapter", "ip-adapter-plus_sdxl_vit-h.safetensors")

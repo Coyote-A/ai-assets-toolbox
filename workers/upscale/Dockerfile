@@ -47,8 +47,8 @@ ENV PYTHONPATH=/app
 
 # 1. Illustrious-XL v2.0 — single safetensors file
 RUN mkdir -p /app/models/illustrious-xl \
-    && wget -q --show-progress -O /app/models/illustrious-xl/illustrious-xl-v2.0.safetensors \
-        "https://huggingface.co/OnomaAIResearch/Illustrious-XL-v2.0/resolve/main/illustriousXL_v20.safetensors" \
+    && wget -q --show-progress -O /app/models/illustrious-xl/Illustrious-XL-v2.0.safetensors \
+        "https://huggingface.co/OnomaAIResearch/Illustrious-XL-v2.0/resolve/main/Illustrious-XL-v2.0.safetensors" \
     && echo "Illustrious-XL v2.0 downloaded successfully"
 
 # 2. ControlNet Tile SDXL — config + weights
