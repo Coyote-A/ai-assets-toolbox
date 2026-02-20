@@ -234,7 +234,15 @@ class RunPodClient:
                 "caption",
                 {"tiles": batch, "caption_params": caption_params},
             )
-            all_captions.extend(output.get("captions", []))
+            # Backend returns {"captions": {"tile_id": "caption", ...}} as a dict
+            captions_dict = output.get("captions", {})
+            if isinstance(captions_dict, dict):
+                # Convert dict format to list format
+                for tile_id, caption in captions_dict.items():
+                    all_captions.append({"tile_id": tile_id, "caption": caption})
+            elif isinstance(captions_dict, list):
+                # Handle if backend already returns list format
+                all_captions.extend(captions_dict)
 
         return all_captions
 
@@ -267,12 +275,20 @@ class RunPodClient:
             "caption",
             {"tiles": tiles_payload, "caption_params": caption_params},
         )
-        # Convert tile_id back to region_id in the response
-        captions = output.get("captions", [])
-        return [
-            {"region_id": c["tile_id"], "caption": c["caption"]}
-            for c in captions
-        ]
+        # Backend returns {"captions": {"tile_id": "caption", ...}} as a dict
+        captions_dict = output.get("captions", {})
+        if isinstance(captions_dict, dict):
+            # Convert dict format to list with region_id
+            return [
+                {"region_id": tile_id, "caption": caption}
+                for tile_id, caption in captions_dict.items()
+            ]
+        else:
+            # Handle if backend already returns list format
+            return [
+                {"region_id": c["tile_id"], "caption": c["caption"]}
+                for c in captions_dict
+            ]
 
     def upscale_tiles(self, tiles_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
