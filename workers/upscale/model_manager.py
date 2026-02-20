@@ -55,12 +55,24 @@ CONTROLNET_MODELS: dict[str, str] = {
 
 # ---------------------------------------------------------------------------
 # Hardcoded CivitAI LoRAs
-# Maps short name → CivitAI model version ID
+# Maps UI name → CivitAI model and version information
 # ---------------------------------------------------------------------------
-HARDCODED_LORAS: dict[str, int] = {
-    "lora_929497": 2247497,
-    "lora_100435": 1096293,
-    "lora_1231943": 1736373,
+HARDCODED_LORAS = {
+    "Aesthetic Quality": {
+        "model_id": "929497",
+        "version_id": "2247497",
+        "filename": "lora_929497.safetensors"
+    },
+    "Character Design": {
+        "model_id": "100435",
+        "version_id": "1096293",
+        "filename": "lora_100435.safetensors"
+    },
+    "Detailer IL": {
+        "model_id": "1231943",
+        "version_id": "1736373",
+        "filename": "lora_1231943.safetensors"
+    }
 }
 
 
@@ -83,26 +95,26 @@ def ensure_loras_downloaded() -> None:
 
     os.makedirs(LORAS_DIR, exist_ok=True)
 
-    for short_name, version_id in HARDCODED_LORAS.items():
-        dest_path = os.path.join(LORAS_DIR, f"{short_name}.safetensors")
+    for ui_name, info in HARDCODED_LORAS.items():
+        dest_path = os.path.join(LORAS_DIR, info["filename"])
         if os.path.isfile(dest_path):
             logger.info(
                 "LoRA '%s' already exists at '%s' — skipping download",
-                short_name, dest_path,
+                ui_name, dest_path,
             )
             continue
 
         if not token:
             logger.warning(
                 "Skipping download of LoRA '%s' (version %s) — no API token",
-                short_name, version_id,
+                ui_name, info["version_id"],
             )
             continue
 
-        url = f"https://civitai.com/api/download/models/{version_id}?token={token}"
+        url = f"https://civitai.com/api/download/models/{info['version_id']}?token={token}"
         logger.info(
             "Downloading LoRA '%s' (version %s) from CivitAI → '%s'",
-            short_name, version_id, dest_path,
+            ui_name, info["version_id"], dest_path,
         )
         try:
             response = requests.get(url, stream=True, allow_redirects=True, timeout=300)
@@ -425,20 +437,23 @@ class ModelManager:
         return baked_path
 
     def _resolve_lora_path(self, lora_name: str) -> str:
+        # Check if it's a real UI name from HARDCODED_LORAS
+        if lora_name in HARDCODED_LORAS:
+            info = HARDCODED_LORAS[lora_name]
+            lora_path = os.path.join(LORAS_DIR, info["filename"])
+            if os.path.isfile(lora_path):
+                return lora_path
+            raise FileNotFoundError(
+                f"Hardcoded LoRA '{lora_name}' has not been downloaded yet. "
+                f"Run ensure_loras_downloaded() at startup."
+            )
+        
         # Try exact filename first, then with .safetensors extension
         for candidate in [lora_name, f"{lora_name}.safetensors"]:
             path = os.path.join(LORAS_DIR, candidate)
             if os.path.isfile(path):
                 return path
-        # Also accept hardcoded LoRA short names
-        if lora_name in HARDCODED_LORAS:
-            hardcoded_path = os.path.join(LORAS_DIR, f"{lora_name}.safetensors")
-            if os.path.isfile(hardcoded_path):
-                return hardcoded_path
-            raise FileNotFoundError(
-                f"Hardcoded LoRA '{lora_name}' has not been downloaded yet. "
-                f"Run ensure_loras_downloaded() at startup."
-            )
+                
         raise FileNotFoundError(
             f"LoRA '{lora_name}' not found in '{LORAS_DIR}'"
         )

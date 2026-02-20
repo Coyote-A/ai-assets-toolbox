@@ -90,9 +90,9 @@ ACTIVE_MODEL = "illustrious-xl"
 
 # Hardcoded LoRAs — automatically included in every upscale request
 HARDCODED_LORAS = [
-    {"name": "lora_929497", "weight": 1.0},
-    {"name": "lora_100435", "weight": 1.0},
-    {"name": "lora_1231943", "weight": 1.0},
+    {"name": "Aesthetic Quality", "model_id": "929497", "version_id": "2247497", "default_weight": 1.0},
+    {"name": "Character Design", "model_id": "100435", "version_id": "1096293", "default_weight": 1.0},
+    {"name": "Detailer IL", "model_id": "1231943", "version_id": "1736373", "default_weight": 1.0},
 ]
 
 # Generation resolution presets: (label, value) where 0 means "same as grid tile size"
@@ -602,8 +602,8 @@ def _upscale_tiles_batch(
     controlnet_enabled: bool,
     conditioning_scale: float,
     client: RunPodClient,
-    # LoRA weight
-    lora_weight: float = 1.0,
+    # LoRA states (list of dicts with 'enabled' and 'weight')
+    lora_states: List[Dict],
     # IP-Adapter params (optional)
     ip_adapter_enabled: bool = False,
     ip_adapter_image: Optional[Image.Image] = None,
@@ -626,6 +626,25 @@ def _upscale_tiles_batch(
 
     if not tiles_state or original_img is None:
         return tiles_state, None, "⚠️ No tiles to process."
+
+    # Automatic trigger word injection for active LoRAs
+    from frontend.civitai_models import get_model_details_by_name
+    injected_triggers = []
+    
+    for lora, state in zip(HARDCODED_LORAS, lora_states):
+        if state.get("enabled", True):
+            model_details = get_model_details_by_name(lora["name"])
+            if model_details and "trigger_words" in model_details:
+                for trigger in model_details["trigger_words"]:
+                    if trigger not in global_prompt and trigger not in injected_triggers:
+                        injected_triggers.append(trigger)
+    
+    if injected_triggers:
+        trigger_text = ", ".join(injected_triggers)
+        if global_prompt:
+            global_prompt = f"{trigger_text}, {global_prompt}"
+        else:
+            global_prompt = trigger_text
 
     # Resolve effective generation resolution — must be >= tile_size
     effective_gen_res = gen_res if gen_res and gen_res > tile_size else tile_size
@@ -655,8 +674,11 @@ def _upscale_tiles_batch(
             tile_img = tile_img.resize((effective_gen_res, effective_gen_res), Image.LANCZOS)
         tile_b64 = _pil_to_b64(tile_img)
 
-        # Build LoRA list with current weight
-        dynamic_loras = [{"name": lora["name"], "weight": lora_weight} for lora in HARDCODED_LORAS]
+        # Build LoRA list with current states (enabled and weight)
+        dynamic_loras = []
+        for lora, state in zip(HARDCODED_LORAS, lora_states):
+            if state.get("enabled", True):
+                dynamic_loras.append({"name": lora["name"], "weight": state.get("weight", 1.0)})
         
         entry: Dict[str, Any] = {
             "tile_id": tile["tile_id"],
@@ -934,11 +956,61 @@ def create_upscale_tab(client: RunPodClient) -> None:
                             scale=1,
                             info="-1 = random seed each run.",
                         )
-                    lora_weight_sl = gr.Slider(
-                        0.0, 2.0, value=1.0, step=0.1,
-                        label="LoRA Weight",
-                        info="Weight for all 3 LoRAs (detail enhancement). 1.0 is default.",
-                    )
+                    # Individual LoRA Controls
+                    gr.Markdown("### LoRA Controls")
+                    # Aesthetic Quality
+                    with gr.Row():
+                        lora_aesthetic_enabled = gr.Checkbox(
+                            value=True,
+                            label="Aesthetic Quality",
+                            info="Enhances image quality with 'masterpiece' and 'best quality' effects.",
+                            scale=2,
+                        )
+                        lora_aesthetic_weight = gr.Slider(
+                            0.0, 2.0, value=1.0, step=0.1,
+                            label="Weight",
+                            scale=1,
+                        )
+                    # Character Design
+                    with gr.Row():
+                        lora_character_enabled = gr.Checkbox(
+                            value=True,
+                            label="Character Design",
+                            info="For character design sheets with color palette support.",
+                            scale=2,
+                        )
+                        lora_character_weight = gr.Slider(
+                            0.0, 2.0, value=1.0, step=0.1,
+                            label="Weight",
+                            scale=1,
+                        )
+                    # Detailer IL
+                    with gr.Row():
+                        lora_detailer_enabled = gr.Checkbox(
+                            value=True,
+                            label="Detailer IL",
+                            info="Improves image details and enhancement.",
+                            scale=2,
+                        )
+                        lora_detailer_weight = gr.Slider(
+                            0.0, 2.0, value=1.0, step=0.1,
+                            label="Weight",
+                            scale=1,
+                        )
+
+                # ---- 🎨 CivitAI Model Information ----
+                with gr.Accordion("🎨 CivitAI Model Information", open=False):
+                    gr.Markdown("### Active LoRAs")
+                    gr.Markdown("""
+                    **Aesthetic Quality** (929497): Enhances image quality with 'masterpiece' and 'best quality' effects.  
+                    Trigger words: `masterpiece`, `best quality`, `very aesthetic`
+
+                    **Detailer IL** (1231943): Improves image details and enhancement.  
+                    Trigger words: `Jeddtl02`
+
+                    **Character Design** (100435): NOT displayed in upscale tab (helper model).  
+                    For character design sheets with color palette support.
+                    """)
 
                 # ---- 🔧 ControlNet ----
                 with gr.Accordion("🔧 ControlNet", open=False):
@@ -1110,7 +1182,10 @@ def create_upscale_tab(client: RunPodClient) -> None:
             seam_fix_enabled, seam_fix_strength, seam_fix_feather,
             gen_res_label,
             full_b64,
-            lora_weight,
+            # LoRA states
+            lora_aesthetic_enabled, lora_aesthetic_weight,
+            lora_character_enabled, lora_character_weight,
+            lora_detailer_enabled, lora_detailer_weight,
         ):
             """Upscale all tiles and return updated grid HTML + assembled result.
 
@@ -1123,6 +1198,13 @@ def create_upscale_tab(client: RunPodClient) -> None:
             overlap   = int(ov)
             gen_res_val = _GEN_RES_LABEL_TO_VALUE.get(gen_res_label, 0)
 
+            # Collect LoRA states
+            lora_states = [
+                {"enabled": lora_aesthetic_enabled, "weight": lora_aesthetic_weight},
+                {"enabled": lora_character_enabled, "weight": lora_character_weight},
+                {"enabled": lora_detailer_enabled, "weight": lora_detailer_weight},
+            ]
+
             # ------------------------------------------------------------------
             # Pass 1 — standard tile grid
             # ------------------------------------------------------------------
@@ -1133,7 +1215,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
                 strength, int(steps), cfg, int(seed),
                 cn_enabled, cond_scale,
                 client,
-                lora_weight=lora_weight,
+                lora_states=lora_states,
                 ip_adapter_enabled=ip_enabled,
                 ip_adapter_image=ip_img,
                 ip_adapter_scale=ip_scale,
@@ -1174,8 +1256,11 @@ def create_upscale_tab(client: RunPodClient) -> None:
                                 tile_img = tile_img.resize(
                                     (effective_gen_res, effective_gen_res), Image.LANCZOS
                                 )
-                            # Build LoRA list with current weight
-                            dynamic_loras = [{"name": lora["name"], "weight": lora_weight} for lora in HARDCODED_LORAS]
+                            # Build LoRA list with current states
+                            dynamic_loras = []
+                            for lora, state in zip(HARDCODED_LORAS, lora_states):
+                                if state.get("enabled", True):
+                                    dynamic_loras.append({"name": lora["name"], "weight": state.get("weight", 1.0)})
                             entry: Dict[str, Any] = {
                                 "tile_id": f"seam_{ti.row}_{ti.col}",
                                 "image_b64": _pil_to_b64(tile_img),
@@ -1254,7 +1339,9 @@ def create_upscale_tab(client: RunPodClient) -> None:
                 seam_fix_cb, seam_fix_strength_sl, seam_fix_feather_sl,
                 gen_res_dd,
                 full_image_b64_state,
-                lora_weight_sl,
+                lora_aesthetic_enabled, lora_aesthetic_weight,
+                lora_character_enabled, lora_character_weight,
+                lora_detailer_enabled, lora_detailer_weight,
             ],
             outputs=[tiles_state, tile_grid_html, result_image, status_text],
         )
@@ -1271,13 +1358,24 @@ def create_upscale_tab(client: RunPodClient) -> None:
             ip_enabled, ip_img, ip_scale,
             gen_res_label,
             full_b64,
-            lora_weight,
+            # LoRA states
+            lora_aesthetic_enabled, lora_aesthetic_weight,
+            lora_character_enabled, lora_character_weight,
+            lora_detailer_enabled, lora_detailer_weight,
         ):
             """Upscale only the currently selected tile."""
             if selected_idx < 0:
                 grid_html = _rebuild_grid_html(tiles, full_b64, selected_idx, orig_img)
                 return tiles, grid_html, None, None, "⚠️ No tile selected. Click a tile in the grid first."
             gen_res_val = _GEN_RES_LABEL_TO_VALUE.get(gen_res_label, 0)
+            
+            # Collect LoRA states
+            lora_states = [
+                {"enabled": lora_aesthetic_enabled, "weight": lora_aesthetic_weight},
+                {"enabled": lora_character_enabled, "weight": lora_character_weight},
+                {"enabled": lora_detailer_enabled, "weight": lora_detailer_weight},
+            ]
+            
             updated, result, msg = _upscale_tiles_batch(
                 tiles, [selected_idx], orig_img,
                 g_prompt, neg_prompt,
@@ -1285,7 +1383,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
                 strength, int(steps), cfg, int(seed),
                 cn_enabled, cond_scale,
                 client,
-                lora_weight=lora_weight,
+                lora_states=lora_states,
                 ip_adapter_enabled=ip_enabled,
                 ip_adapter_image=ip_img,
                 ip_adapter_scale=ip_scale,
@@ -1308,7 +1406,9 @@ def create_upscale_tab(client: RunPodClient) -> None:
                 ip_adapter_cb, ip_style_image, ip_scale_sl,
                 gen_res_dd,
                 full_image_b64_state,
-                lora_weight_sl,
+                lora_aesthetic_enabled, lora_aesthetic_weight,
+                lora_character_enabled, lora_character_weight,
+                lora_detailer_enabled, lora_detailer_weight,
             ],
             outputs=[tiles_state, tile_grid_html, tile_proc_preview, result_image, status_text],
         )

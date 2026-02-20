@@ -1,0 +1,32 @@
+[
+  {
+    "model_id": "929497",
+    "version_id": "2247497",
+    "full_name": "Aesthetic Quality Modifiers - Masterpiece",
+    "ui_name": "Aesthetic Quality",
+    "tags": ["aesthetic", "quality", "masterpiece", "best quality"],
+    "url": "https://civitai.com/models/929497?modelVersionId=2247497",
+    "trigger_words": ["masterpiece", "best quality", "very aesthetic"],
+    "usage_tips": "Strength: 1"
+  },
+  {
+    "model_id": "100435",
+    "version_id": "1096293",
+    "full_name": "Character Design Sheet (HELPER) (3-PERSPECTIVES)+(COLOR PALETTE) - Z-IMAGE TURBO | Illustrious XL | FLUX | XL PONY | SD 1.5 - by YeiyeiArt",
+    "ui_name": "Character Design",
+    "tags": ["character design", "reference sheet", "helper", "color palette"],
+    "url": "https://civitai.com/models/100435?modelVersionId=1096293",
+    "trigger_words": ["CharacterDesignIllustrious", "reference sheet", "simple white background", "color guide", "multiple views", "full body", "dynamic pose"],
+    "usage_tips": "Clip Skip: 2, Strength: 0.8"
+  },
+  {
+    "model_id": "1231943",
+    "version_id": "1736373",
+    "full_name": "Detailer IL",
+    "ui_name": "Detailer IL",
+    "tags": ["detailer", "enhancement", "image improvement"],
+    "url": "https://civitai.com/models/1231943?modelVersionId=1736373",
+    "trigger_words": ["Jeddtl02"],
+    "usage_tips": ""
+  }
+]
