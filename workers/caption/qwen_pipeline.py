@@ -17,8 +17,10 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 DEFAULT_SYSTEM_PROMPT = (
-    "Describe this image tile in detail for use as a Stable Diffusion prompt. "
-    "Focus on visual elements, style, colors, and composition."
+    "Generate a concise Stable Diffusion prompt for this image. "
+    "Output ONLY comma-separated keywords and phrases describing visual elements, style, colors, and composition. "
+    "NO explanations, NO markdown, NO headers, NO introductory text like 'Here is' or 'Of course'. "
+    "Example output: lush green meadow, small pond, blue water, dirt path, isometric view, cartoon style, vibrant colors"
 )
 
 

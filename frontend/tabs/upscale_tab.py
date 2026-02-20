@@ -680,10 +680,16 @@ def _upscale_tiles_batch(
             if state.get("enabled", True):
                 dynamic_loras.append({"name": lora["name"], "weight": state.get("weight", 1.0)})
         
+        # Combine global prompt with tile-specific prompt (tile prompt appends to global)
+        if tile_prompt:
+            combined_prompt = f"{global_prompt}, {tile_prompt}" if global_prompt else tile_prompt
+        else:
+            combined_prompt = None
+
         entry: Dict[str, Any] = {
             "tile_id": tile["tile_id"],
             "image_b64": tile_b64,
-            "prompt_override": tile_prompt if tile_prompt else None,
+            "prompt_override": combined_prompt,
             "model": ACTIVE_MODEL,
             "loras": dynamic_loras,
             "global_prompt": global_prompt,
