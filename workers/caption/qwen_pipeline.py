@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_SYSTEM_PROMPT = (
     "Describe the visual content of this image tile for a Stable Diffusion prompt. "
     "Focus ONLY on objects, elements, and composition - NOT style or aesthetic. "
-    "Output ONLY comma-separated keywords describing what is in the tile. "
+    "Output ONLY comma-separated keywords, each keyword appears ONCE, no repetitions. "
+    "Keep it brief - maximum 10-15 keywords. "
     "NO explanations, NO markdown, NO headers, NO introductory text. "
     "Example output: small pond, blue water, dirt path, grass, rocks, trees"
 )

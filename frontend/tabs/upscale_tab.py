@@ -844,7 +844,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
                             show_label=True,
                         )
                     tile_prompt_box = gr.Textbox(
-                        label="Tile Prompt (editable — overrides global prompt for this tile)",
+                        label="Tile Prompt (appends to global prompt)",
                         lines=2,
                         placeholder="Leave empty to use the global prompt, or enter a tile-specific prompt…",
                     )
