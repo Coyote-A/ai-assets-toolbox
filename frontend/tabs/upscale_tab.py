@@ -602,6 +602,8 @@ def _upscale_tiles_batch(
     controlnet_enabled: bool,
     conditioning_scale: float,
     client: RunPodClient,
+    # LoRA weight
+    lora_weight: float = 1.0,
     # IP-Adapter params (optional)
     ip_adapter_enabled: bool = False,
     ip_adapter_image: Optional[Image.Image] = None,
@@ -653,12 +655,15 @@ def _upscale_tiles_batch(
             tile_img = tile_img.resize((effective_gen_res, effective_gen_res), Image.LANCZOS)
         tile_b64 = _pil_to_b64(tile_img)
 
+        # Build LoRA list with current weight
+        dynamic_loras = [{"name": lora["name"], "weight": lora_weight} for lora in HARDCODED_LORAS]
+        
         entry: Dict[str, Any] = {
             "tile_id": tile["tile_id"],
             "image_b64": tile_b64,
             "prompt_override": tile_prompt if tile_prompt else None,
             "model": ACTIVE_MODEL,
-            "loras": HARDCODED_LORAS,
+            "loras": dynamic_loras,
             "global_prompt": global_prompt,
             "negative_prompt": negative_prompt,
             "controlnet_enabled": controlnet_enabled,
@@ -929,6 +934,11 @@ def create_upscale_tab(client: RunPodClient) -> None:
                             scale=1,
                             info="-1 = random seed each run.",
                         )
+                    lora_weight_sl = gr.Slider(
+                        0.0, 2.0, value=1.0, step=0.1,
+                        label="LoRA Weight",
+                        info="Weight for all 3 LoRAs (detail enhancement). 1.0 is default.",
+                    )
 
                 # ---- 🔧 ControlNet ----
                 with gr.Accordion("🔧 ControlNet", open=False):
@@ -1100,6 +1110,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
             seam_fix_enabled, seam_fix_strength, seam_fix_feather,
             gen_res_label,
             full_b64,
+            lora_weight,
         ):
             """Upscale all tiles and return updated grid HTML + assembled result.
 
@@ -1122,6 +1133,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
                 strength, int(steps), cfg, int(seed),
                 cn_enabled, cond_scale,
                 client,
+                lora_weight=lora_weight,
                 ip_adapter_enabled=ip_enabled,
                 ip_adapter_image=ip_img,
                 ip_adapter_scale=ip_scale,
@@ -1162,12 +1174,14 @@ def create_upscale_tab(client: RunPodClient) -> None:
                                 tile_img = tile_img.resize(
                                     (effective_gen_res, effective_gen_res), Image.LANCZOS
                                 )
+                            # Build LoRA list with current weight
+                            dynamic_loras = [{"name": lora["name"], "weight": lora_weight} for lora in HARDCODED_LORAS]
                             entry: Dict[str, Any] = {
                                 "tile_id": f"seam_{ti.row}_{ti.col}",
                                 "image_b64": _pil_to_b64(tile_img),
                                 "prompt_override": None,
                                 "model": ACTIVE_MODEL,
-                                "loras": HARDCODED_LORAS,
+                                "loras": dynamic_loras,
                                 "global_prompt": g_prompt,
                                 "negative_prompt": neg_prompt,
                                 "controlnet_enabled": cn_enabled,
@@ -1240,6 +1254,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
                 seam_fix_cb, seam_fix_strength_sl, seam_fix_feather_sl,
                 gen_res_dd,
                 full_image_b64_state,
+                lora_weight_sl,
             ],
             outputs=[tiles_state, tile_grid_html, result_image, status_text],
         )
@@ -1256,6 +1271,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
             ip_enabled, ip_img, ip_scale,
             gen_res_label,
             full_b64,
+            lora_weight,
         ):
             """Upscale only the currently selected tile."""
             if selected_idx < 0:
@@ -1269,6 +1285,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
                 strength, int(steps), cfg, int(seed),
                 cn_enabled, cond_scale,
                 client,
+                lora_weight=lora_weight,
                 ip_adapter_enabled=ip_enabled,
                 ip_adapter_image=ip_img,
                 ip_adapter_scale=ip_scale,
@@ -1291,6 +1308,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
                 ip_adapter_cb, ip_style_image, ip_scale_sl,
                 gen_res_dd,
                 full_image_b64_state,
+                lora_weight_sl,
             ],
             outputs=[tiles_state, tile_grid_html, tile_proc_preview, result_image, status_text],
         )
