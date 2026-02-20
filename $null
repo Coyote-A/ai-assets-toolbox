@@ -1,0 +1,5 @@
+
+Usage:   
+  pip show [options] <package> ...
+
+no such option: -c

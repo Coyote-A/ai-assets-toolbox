@@ -48,6 +48,10 @@ class QwenPipeline:
 
     def _load(self) -> None:
         from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+        # Import qwen_vl_utils to register Qwen VL processor classes with transformers
+        # This MUST be imported before calling AutoProcessor.from_pretrained()
+        # Otherwise, video_processing_auto.py will fail with "if class_name in extractors"
+        import qwen_vl_utils
 
         logger.info("Loading Qwen3-VL-2B from '%s'", self.model_path)
 
