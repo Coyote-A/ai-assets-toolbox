@@ -104,16 +104,63 @@ DEFAULT_OVERLAP = 128
 # ---------------------------------------------------------------------------
 
 
-def _pil_to_bytes(img: Image.Image, fmt: str = "PNG") -> bytes:
-    """Encode a PIL Image to raw bytes (PNG by default)."""
+def _pil_to_bytes(img: Image.Image, fmt: str = "PNG", quality: int = 95) -> bytes:
+    """Encode a PIL Image to raw bytes (PNG by default, JPEG if fmt='JPEG')."""
     buf = io.BytesIO()
-    img.save(buf, format=fmt)
+    if fmt.upper() == "JPEG":
+        # JPEG does not support alpha — flatten to RGB first
+        if img.mode != "RGB":
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            if img.mode == "RGBA":
+                bg.paste(img, mask=img.split()[3])
+            else:
+                bg.paste(img.convert("RGB"))
+            img = bg
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+    else:
+        img.save(buf, format=fmt)
     return buf.getvalue()
 
 
 def _bytes_to_pil(data: bytes) -> Image.Image:
     """Decode raw image bytes (PNG/JPEG) to a PIL Image (RGB)."""
     return Image.open(io.BytesIO(data)).convert("RGB")
+
+
+def _compress_image(image: Image.Image, max_size: int = 4096, quality: int = 90) -> Image.Image:
+    """
+    Compress an uploaded image for faster processing.
+
+    Converts RGBA → RGB (JPEG-compatible) and optionally downscales if the
+    longest side exceeds *max_size*.  This reduces serialisation overhead when
+    the image is later split into tiles and sent to GPU services.
+
+    Args:
+        image:    source PIL Image (any mode).
+        max_size: maximum pixels on the longest side before downscaling.
+        quality:  unused here (kept for API symmetry); JPEG quality is applied
+                  when tiles are encoded, not at this stage.
+
+    Returns:
+        RGB PIL Image, downscaled if necessary.
+    """
+    # Flatten alpha channel onto white background
+    if image.mode == "RGBA":
+        bg = Image.new("RGB", image.size, (255, 255, 255))
+        bg.paste(image, mask=image.split()[3])
+        image = bg
+    elif image.mode != "RGB":
+        image = image.convert("RGB")
+
+    # Downscale if the image exceeds the maximum allowed dimension
+    w, h = image.size
+    if max(w, h) > max_size:
+        ratio = max_size / max(w, h)
+        new_w, new_h = int(w * ratio), int(h * ratio)
+        image = image.resize((new_w, new_h), Image.LANCZOS)
+        logger.info("_compress_image: downscaled %dx%d → %dx%d", w, h, new_w, new_h)
+
+    return image
 
 
 # ---------------------------------------------------------------------------
@@ -463,11 +510,15 @@ def _rebuild_grid_html(
 
 
 def _build_tile_state(tile_info: TileInfo, tile_img: Image.Image) -> Dict[str, Any]:
-    """Create the initial state dict for a single tile."""
+    """Create the initial state dict for a single tile.
+
+    Tiles are stored as JPEG bytes (quality 95) rather than PNG to reduce
+    in-memory footprint and serialisation overhead when sent to GPU services.
+    """
     return {
         "info": tile_info,
         "tile_id": tile_info.tile_id,
-        "original_bytes": _pil_to_bytes(tile_img),
+        "original_bytes": _pil_to_bytes(tile_img, fmt="JPEG", quality=95),
         "processed_bytes": None,
         "processed_b64_display": None,  # JPEG b64 for grid display only
         "prompt": "",
@@ -501,6 +552,10 @@ def _on_image_upload(
     _empty_html = "<p style='color:#888; padding:16px;'>Upload an image to see the tile grid.</p>"
     if image is None:
         return [], -1, None, "", _empty_html, "No image uploaded."
+
+    # Compress on upload: flatten alpha, convert to RGB, downscale if oversized.
+    # This reduces tile serialisation size by up to 10-50× for photographic PNGs.
+    image = _compress_image(image, max_size=MAX_RESOLUTION)
 
     target_w, target_h = _compute_target_size(image.size, resolution_choice)
     target_w = min(target_w, MAX_RESOLUTION)
@@ -665,6 +720,10 @@ def _upscale_tiles_batch(
 
         # Optionally upscale tile to generation resolution
         tile_img = _tile_pil(tile)
+        # Ensure RGB before encoding — tiles stored as JPEG are already RGB,
+        # but guard against any edge-case mode (e.g. palette images).
+        if tile_img.mode != "RGB":
+            tile_img = tile_img.convert("RGB")
         if effective_gen_res != tile_size:
             tile_img = tile_img.resize((effective_gen_res, effective_gen_res), Image.LANCZOS)
 
@@ -823,15 +882,19 @@ def create_gradio_app() -> gr.Blocks:
         # on_load_outputs_wizard contains:
         #   [0] hf_token_input textbox
         #   [1] civitai_token_input textbox
-        #   [2] wizard_group
-        #   [3] ← tool_group injected here by the caller (us)
-        #   [4] step1_group
-        #   [5] step2_group
+        #   [2] hf_status_html
+        #   [3] civitai_status_html
+        #   [4] step1_save_status
+        #   [5] wizard_group
+        #   [6] ← tool_group injected here by the caller (us)
+        #   [7] step1_group
+        #   [8] step2_group
         # ------------------------------------------------------------------
         full_on_load_outputs = (
-            on_load_outputs_wizard[:3]   # hf_input, civitai_input, wizard_group
-            + [tool_group]               # injected here — index 3
-            + on_load_outputs_wizard[3:] # step1_group, step2_group
+            on_load_outputs_wizard[:6]   # hf_input, civitai_input, hf_status,
+                                         # civitai_status, save_status, wizard_group
+            + [tool_group]               # injected here — index 6
+            + on_load_outputs_wizard[6:] # step1_group, step2_group
         )
 
         demo.load(

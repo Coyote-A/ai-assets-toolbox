@@ -93,6 +93,21 @@ def _initial_status_html() -> str:
     return _build_progress_html(status, {})
 
 
+def _token_status_html(saved: bool) -> str:
+    """Return a small inline HTML badge indicating whether a token is saved."""
+    if saved:
+        return (
+            '<span style="color:#4CAF50;font-size:0.9em;font-weight:600;">'
+            "✅ Saved"
+            "</span>"
+        )
+    return (
+        '<span style="color:#9E9E9E;font-size:0.9em;">'
+        "❌ Not set"
+        "</span>"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public factory
 # ---------------------------------------------------------------------------
@@ -129,7 +144,7 @@ def create_setup_wizard() -> tuple:
         * *on_load_inputs* — list of ``gr.BrowserState`` components to
           pass as ``inputs`` to ``demo.load``.
         * *on_load_outputs* — list of components to pass as ``outputs`` to
-          ``demo.load`` (textboxes + group visibility).
+          ``demo.load`` (textboxes + status badges + group visibility).
         * *step1_group* — the Step-1 ``gr.Group``; exposed so the caller
           can include it in ``on_load_outputs``.
     """
@@ -163,18 +178,33 @@ def create_setup_wizard() -> tuple:
                 "* **CivitAI token** — required only for LoRA downloads."
             )
 
-            hf_token_input = gr.Textbox(
-                label="HuggingFace Token (optional)",
-                type="password",
-                placeholder="hf_…",
-            )
-            civitai_token_input = gr.Textbox(
-                label="CivitAI API Token (optional)",
-                type="password",
-                placeholder="Paste your CivitAI token here…",
-            )
+            with gr.Row():
+                hf_token_input = gr.Textbox(
+                    label="HuggingFace Token (optional)",
+                    type="password",
+                    placeholder="hf_…",
+                    scale=4,
+                )
+                hf_status_html = gr.HTML(
+                    value=_token_status_html(False),
+                    label="",
+                )
 
-            step1_next_btn = gr.Button("Save & Continue →", variant="primary")
+            with gr.Row():
+                civitai_token_input = gr.Textbox(
+                    label="CivitAI API Token (optional)",
+                    type="password",
+                    placeholder="Paste your CivitAI token here…",
+                    scale=4,
+                )
+                civitai_status_html = gr.HTML(
+                    value=_token_status_html(False),
+                    label="",
+                )
+
+            with gr.Row():
+                step1_next_btn = gr.Button("Save & Continue →", variant="primary")
+                step1_save_status = gr.HTML(value="", label="")
 
         # --------------------------------------------------------------
         # Step 2: Model Downloads
@@ -224,12 +254,15 @@ def create_setup_wizard() -> tuple:
     #   • Models missing, tokens saved   → show wizard at Step 2
     #   • Models missing, no tokens      → show wizard at Step 1
     #
-    # Returns a 6-tuple that maps to on_load_outputs (see below).
+    # Returns a 9-tuple that maps to on_load_outputs (see below).
     # ------------------------------------------------------------------
     def _on_load(hf_tok: str, civitai_tok: str):
         """Combined page-load handler: restore tokens + route to correct step."""
         hf_tok = hf_tok or ""
         civitai_tok = civitai_tok or ""
+
+        hf_saved = bool(hf_tok)
+        civitai_saved = bool(civitai_tok)
 
         # Check whether all models are already present.
         all_ready = False
@@ -244,12 +277,15 @@ def create_setup_wizard() -> tuple:
         if all_ready:
             # Skip wizard entirely — show the main tool.
             return (
-                hf_tok,                      # hf_token_input
-                civitai_tok,                 # civitai_token_input
-                gr.Group(visible=False),     # wizard_group
-                gr.Group(visible=True),      # tool_group  (caller provides at index 3)
-                gr.Group(visible=True),      # step1_group (doesn't matter, wizard hidden)
-                gr.Group(visible=False),     # step2_group
+                hf_tok,                           # hf_token_input
+                civitai_tok,                      # civitai_token_input
+                _token_status_html(hf_saved),     # hf_status_html
+                _token_status_html(civitai_saved),# civitai_status_html
+                "",                               # step1_save_status (clear)
+                gr.Group(visible=False),          # wizard_group
+                gr.Group(visible=True),           # tool_group  (caller provides at index 6)
+                gr.Group(visible=True),           # step1_group (doesn't matter, wizard hidden)
+                gr.Group(visible=False),          # step2_group
             )
 
         has_tokens = bool(hf_tok or civitai_tok)
@@ -258,57 +294,87 @@ def create_setup_wizard() -> tuple:
             return (
                 hf_tok,
                 civitai_tok,
-                gr.Group(visible=True),      # wizard_group
-                gr.Group(visible=False),     # tool_group
-                gr.Group(visible=False),     # step1_group  ← hidden
-                gr.Group(visible=True),      # step2_group  ← shown
+                _token_status_html(hf_saved),
+                _token_status_html(civitai_saved),
+                "",                               # step1_save_status (clear)
+                gr.Group(visible=True),           # wizard_group
+                gr.Group(visible=False),          # tool_group
+                gr.Group(visible=False),          # step1_group  ← hidden
+                gr.Group(visible=True),           # step2_group  ← shown
             )
 
         # No tokens yet → show Step 1 as normal.
         return (
             hf_tok,
             civitai_tok,
-            gr.Group(visible=True),          # wizard_group
-            gr.Group(visible=False),         # tool_group
-            gr.Group(visible=True),          # step1_group
-            gr.Group(visible=False),         # step2_group
+            _token_status_html(False),
+            _token_status_html(False),
+            "",                                   # step1_save_status (clear)
+            gr.Group(visible=True),               # wizard_group
+            gr.Group(visible=False),              # tool_group
+            gr.Group(visible=True),               # step1_group
+            gr.Group(visible=False),              # step2_group
         )
 
     # Inputs: the two BrowserState components.
     on_load_inputs = [hf_token_state, civitai_token_state]
-    # Outputs (wizard-side): textboxes + wizard_group + step1_group + step2_group.
-    # The caller must insert tool_group at index 3 when wiring demo.load:
+    # Outputs (wizard-side): textboxes + status badges + wizard_group + step1_group + step2_group.
+    # The caller must insert tool_group at index 6 when wiring demo.load:
     #
     #   full_outputs = (
-    #       on_load_outputs[:3]   # hf_input, civitai_input, wizard_group
-    #       + [tool_group]        # injected by caller
-    #       + on_load_outputs[3:] # step1_group, step2_group
+    #       on_load_outputs[:6]   # hf_input, civitai_input, hf_status,
+    #                             # civitai_status, save_status, wizard_group
+    #       + [tool_group]        # injected by caller  (index 6 in _on_load)
+    #       + on_load_outputs[6:] # step1_group, step2_group
     #   )
     on_load_outputs_wizard = [
-        hf_token_input,       # 0
-        civitai_token_input,  # 1
-        wizard_group,         # 2
-        # tool_group at index 3 — injected by caller
-        step1_group,          # 4 (after caller inserts tool_group)
-        step2_group,          # 5
+        hf_token_input,        # 0
+        civitai_token_input,   # 1
+        hf_status_html,        # 2
+        civitai_status_html,   # 3
+        step1_save_status,     # 4
+        wizard_group,          # 5
+        # tool_group at index 6 — injected by caller
+        step1_group,           # 7 (after caller inserts tool_group)
+        step2_group,           # 8
     ]
 
     # ------------------------------------------------------------------
     # Event: Step 1 → Step 2 (save tokens, advance)
     # ------------------------------------------------------------------
     def _save_and_advance(hf_tok: str, civitai_tok: str):
-        """Persist tokens to BrowserState and show step 2."""
+        """Persist tokens to BrowserState, show feedback, then advance to step 2."""
+        hf_tok = hf_tok or ""
+        civitai_tok = civitai_tok or ""
+        hf_saved = bool(hf_tok)
+        civitai_saved = bool(civitai_tok)
+        save_feedback = (
+            '<span style="color:#4CAF50;font-size:0.9em;font-weight:600;">'
+            "✅ Keys saved!"
+            "</span>"
+        )
         return (
-            gr.Group(visible=False),   # step1_group
-            gr.Group(visible=True),    # step2_group
-            hf_tok or "",              # hf_token_state
-            civitai_tok or "",         # civitai_token_state
+            gr.Group(visible=False),          # step1_group
+            gr.Group(visible=True),           # step2_group
+            _token_status_html(hf_saved),     # hf_status_html
+            _token_status_html(civitai_saved),# civitai_status_html
+            save_feedback,                    # step1_save_status
+            hf_tok,                           # hf_token_state
+            civitai_tok,                      # civitai_token_state
         )
 
     step1_next_btn.click(
         fn=_save_and_advance,
         inputs=[hf_token_input, civitai_token_input],
-        outputs=[step1_group, step2_group, hf_token_state, civitai_token_state],
+        outputs=[
+            step1_group,
+            step2_group,
+            hf_status_html,
+            civitai_status_html,
+            step1_save_status,
+            hf_token_state,
+            civitai_token_state,
+        ],
     )
 
     # ------------------------------------------------------------------
@@ -394,12 +460,13 @@ def create_setup_wizard() -> tuple:
     # outputs (wizard_group + tool_group) after both groups exist.
     #
     # The caller must register the combined page-load handler on
-    # demo.load, inserting tool_group into the outputs list at index 3:
+    # demo.load, inserting tool_group into the outputs list at index 6:
     #
     #   full_outputs = (
-    #       on_load_outputs[:3]          # hf_input, civitai_input, wizard_group
-    #       + [tool_group]               # injected by caller
-    #       + on_load_outputs[3:]        # step1_group, step2_group
+    #       on_load_outputs[:5]          # hf_input, civitai_input,
+    #                                    # hf_status, civitai_status, save_status
+    #       + [tool_group]               # injected by caller  (index 6 in _on_load)
+    #       + on_load_outputs[5:]        # wizard_group, step1_group, step2_group
     #   )
     #   demo.load(fn=on_load_fn, inputs=on_load_inputs, outputs=full_outputs)
     # ------------------------------------------------------------------
