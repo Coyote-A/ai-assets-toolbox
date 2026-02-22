@@ -230,9 +230,36 @@ class UpscaleService:
         self._compel = _build_compel(self._pipe)
 
         # ------------------------------------------------------------------
-        # 7. Track IP-Adapter state
+        # 7. Load IP-Adapter at startup (avoids lazy-load on first inference)
         # ------------------------------------------------------------------
         self._ip_adapter_loaded: bool = False
+        logger.info(
+            "Loading IP-Adapter from '%s' with CLIP encoder '%s'",
+            IP_ADAPTER_PATH,
+            CLIP_VIT_H_PATH,
+        )
+        try:
+            self._pipe.load_ip_adapter(
+                os.path.dirname(IP_ADAPTER_PATH),
+                subfolder="",
+                weight_name=os.path.basename(IP_ADAPTER_PATH),
+                image_encoder_folder=CLIP_VIT_H_PATH,
+            )
+            # Move the image encoder to CUDA so it matches the pipeline device.
+            # Without this the encoder stays on CPU while the pipeline runs on
+            # CUDA, causing a device-mismatch RuntimeError during inference.
+            if hasattr(self._pipe, "image_encoder") and self._pipe.image_encoder is not None:
+                self._pipe.image_encoder.to("cuda")
+                logger.info("IP-Adapter image_encoder moved to CUDA")
+            # Start with scale 0 — will be set to the requested value when
+            # IP-Adapter is actually used, or kept at 0 to disable it.
+            self._pipe.set_ip_adapter_scale(0.0)
+            self._ip_adapter_loaded = True
+            logger.info("IP-Adapter loaded successfully at startup (scale=0.0)")
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(
+                "Failed to load IP-Adapter at startup — will proceed without it: %s", exc
+            )
 
         # ------------------------------------------------------------------
         # 8. Download hardcoded CivitAI LoRAs to the volume (if missing)
@@ -863,7 +890,12 @@ class UpscaleService:
     # ------------------------------------------------------------------
 
     def _load_ip_adapter(self, scale: float = 0.6) -> None:
-        """Load IP-Adapter weights onto the pipeline."""
+        """Activate IP-Adapter at the requested scale.
+
+        The IP-Adapter weights are loaded once at container startup in
+        ``load_models()``.  This method only updates the scale (and, as a
+        safety net, loads the adapter if the startup load failed).
+        """
         if self._ip_adapter_loaded:
             logger.info("IP-Adapter already loaded — updating scale to %.2f", scale)
             try:
@@ -872,11 +904,13 @@ class UpscaleService:
                 logger.warning("Could not update IP-Adapter scale: %s", exc)
             return
 
+        # Fallback: startup load failed — attempt to load now.
         logger.info(
-            "Loading IP-Adapter from '%s' with CLIP encoder '%s', scale=%.2f",
+            "IP-Adapter not loaded at startup — attempting lazy load "
+            "(scale=%.2f) from '%s' with CLIP encoder '%s'",
+            scale,
             IP_ADAPTER_PATH,
             CLIP_VIT_H_PATH,
-            scale,
         )
         try:
             self._pipe.load_ip_adapter(
@@ -885,6 +919,10 @@ class UpscaleService:
                 weight_name=os.path.basename(IP_ADAPTER_PATH),
                 image_encoder_folder=CLIP_VIT_H_PATH,
             )
+            # Ensure the image encoder is on CUDA to avoid device-mismatch errors.
+            if hasattr(self._pipe, "image_encoder") and self._pipe.image_encoder is not None:
+                self._pipe.image_encoder.to("cuda")
+                logger.info("IP-Adapter image_encoder moved to CUDA (lazy load)")
             self._pipe.set_ip_adapter_scale(scale)
             self._ip_adapter_loaded = True
             logger.info("IP-Adapter loaded successfully (scale=%.2f)", scale)
@@ -892,25 +930,22 @@ class UpscaleService:
             logger.warning("Failed to load IP-Adapter — continuing without it: %s", exc)
 
     def _unload_ip_adapter(self) -> None:
-        """Unload IP-Adapter from the pipeline to free VRAM."""
+        """Disable IP-Adapter by setting its scale to 0.
+
+        The weights remain loaded in memory so they are instantly available for
+        the next request that needs them.  This avoids the overhead of
+        unloading/reloading on every call and keeps ``_ip_adapter_loaded``
+        consistent with the startup-load contract.
+        """
         if not self._ip_adapter_loaded:
             return
 
-        logger.info("Unloading IP-Adapter")
+        logger.info("Disabling IP-Adapter (setting scale to 0.0)")
         try:
             self._pipe.set_ip_adapter_scale(0.0)
+            logger.info("IP-Adapter scale set to 0.0 (weights remain loaded)")
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning("Could not set IP-Adapter scale to 0: %s", exc)
-
-        try:
-            self._pipe.unload_ip_adapter()
-            logger.info("IP-Adapter unloaded successfully")
-        except AttributeError:
-            logger.info("Pipeline does not support unload_ip_adapter() — scale set to 0")
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.warning("Could not unload IP-Adapter: %s", exc)
-
-        self._ip_adapter_loaded = False
 
 
 # ---------------------------------------------------------------------------
