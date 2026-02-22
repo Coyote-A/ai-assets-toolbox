@@ -129,11 +129,11 @@ ALL_MODELS: list[ModelEntry] = [
         service="upscale",
     ),
     ModelEntry(
-        key="qwen3-vl-2b",
+        key="qwen2.5-vl-3b",
         repo_id="Qwen/Qwen2.5-VL-3B-Instruct",
         filename=None,  # full repo
         subfolder=None,
-        local_dir="qwen3-vl-2b",
+        local_dir="qwen2.5-vl-3b",
         size_bytes=6_000_000_000,
         description="Qwen2.5-VL-3B-Instruct (captioning)",
         service="caption",

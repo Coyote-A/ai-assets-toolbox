@@ -132,7 +132,7 @@ class CaptionService:
         # Reload the volume to pick up any newly downloaded model weights.
         models_volume.reload()
 
-        model_dir = get_model_path("qwen3-vl-2b")
+        model_dir = get_model_path("qwen2.5-vl-3b")
 
         # Guard: abort gracefully if the model has not been downloaded yet.
         if not os.path.exists(model_dir):
@@ -398,7 +398,7 @@ class CaptionService:
             vram_used_gb = round((props.total_memory - free_bytes) / (1024 ** 3), 2)
 
         model_loaded = hasattr(self, "_model") and self._model is not None
-        model_path = get_model_path("qwen3-vl-2b")
+        model_path = get_model_path("qwen2.5-vl-3b")
 
         return {
             "status": "ok",
