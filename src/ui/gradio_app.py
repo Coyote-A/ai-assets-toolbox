@@ -769,18 +769,97 @@ def create_gradio_app() -> gr.Blocks:
     It does NOT use ``@modal.asgi_app()`` directly — that decorator is applied
     in the main ``modal_app.py`` entrypoint.
 
+    On first visit the setup wizard is shown.  Once all models are downloaded
+    (or if they were already present) the wizard is hidden and the main tool
+    UI is revealed.
+
     Returns:
         A configured :class:`gradio.Blocks` instance.
     """
+    from src.ui.setup_wizard import create_setup_wizard  # noqa: PLC0415
+
     with gr.Blocks(title="AI Assets Toolbox") as demo:
         gr.Markdown("# 🎨 AI Assets Toolbox")
         gr.Markdown(
             "Tile-based AI upscaling powered by Illustrious-XL + ControlNet Tile on Modal GPU."
         )
 
-        with gr.Tabs():
-            _build_upscale_tab()
-            _build_model_manager_tab()
+        # ------------------------------------------------------------------
+        # Main tool UI — initially hidden until setup is complete
+        # ------------------------------------------------------------------
+        with gr.Group(visible=False) as tool_group:
+            with gr.Tabs():
+                _build_upscale_tab()
+                _build_model_manager_tab()
+
+        # ------------------------------------------------------------------
+        # Setup wizard — shown on first visit; hidden once models are ready.
+        # create_setup_wizard() returns a 6-tuple; we unpack all parts so we
+        # can wire the Start button and the BrowserState token restore here,
+        # where both wizard_group and tool_group are in scope.
+        # ------------------------------------------------------------------
+        (
+            wizard_group,
+            _check_models_downloaded,
+            start_btn,
+            restore_tokens_fn,
+            restore_token_inputs,
+            restore_token_outputs,
+        ) = create_setup_wizard()
+
+        # Wire the Start button: hide wizard, show tool
+        def _on_setup_complete():
+            """Hide the wizard and reveal the main tool."""
+            return gr.Group(visible=False), gr.Group(visible=True)
+
+        start_btn.click(
+            fn=_on_setup_complete,
+            outputs=[wizard_group, tool_group],
+        )
+
+        # ------------------------------------------------------------------
+        # Page-load handler — two responsibilities:
+        #   1. Restore saved API tokens from BrowserState into the textboxes.
+        #   2. Skip the wizard entirely if all models are already downloaded.
+        #
+        # Gradio 6.0 allows multiple demo.load() registrations; each fires
+        # independently on page load.
+        # ------------------------------------------------------------------
+
+        # 1. Restore tokens
+        demo.load(
+            fn=restore_tokens_fn,
+            inputs=restore_token_inputs,
+            outputs=restore_token_outputs,
+        )
+
+        # 2. Check model status and show/hide wizard accordingly
+        def _on_page_load():
+            """
+            Called on every page load.  If all models are already present on
+            the volume, skip straight to the main tool UI.
+            """
+            try:
+                from src.services.download import DownloadService  # noqa: PLC0415
+
+                status = DownloadService().check_status.remote()
+                all_ready = all(v["downloaded"] for v in status.values())
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Could not reach DownloadService on page load — showing wizard."
+                )
+                all_ready = False
+
+            if all_ready:
+                # Models present: hide wizard, show tool
+                return gr.Group(visible=False), gr.Group(visible=True)
+            # Models missing: show wizard, hide tool
+            return gr.Group(visible=True), gr.Group(visible=False)
+
+        demo.load(
+            fn=_on_page_load,
+            outputs=[wizard_group, tool_group],
+        )
 
     return demo
 

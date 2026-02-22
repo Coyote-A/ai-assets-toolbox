@@ -9,12 +9,16 @@ Tile-based AI image upscaler for game assets, powered by Modal.com.
 - IP-Adapter style transfer
 - Automatic tile splitting, processing, and merging
 - Web UI (Gradio) served on Modal
+- **Setup wizard** — first-time model download through the browser UI (no CLI setup needed)
 
 ## Architecture
 Everything runs on Modal.com:
-- **Gradio UI** — CPU container, serves the web interface
+- **Gradio UI** — CPU container, serves the web interface + setup wizard
 - **Caption Service** — T4 GPU, Qwen3-VL-2B-Instruct
 - **Upscale Service** — A10G GPU, Illustrious-XL + ControlNet Tile + LoRAs
+- **Download Service** — CPU, downloads models from HuggingFace into a Modal Volume
+
+Models are stored in the `ai-toolbox-models` Modal Volume (not baked into Docker images), so deploys are fast and model updates don't require image rebuilds.
 
 ## Quick Start
 
@@ -23,7 +27,8 @@ Everything runs on Modal.com:
 - Modal account (https://modal.com)
 
 > **No manual setup needed.** Both scripts below auto-check and configure everything:
-> Python, Modal CLI, authentication, secrets, and volumes.
+> Python, Modal CLI, authentication, and volumes.
+> API keys and model downloads are handled through the **setup wizard** in the browser.
 
 ### Deploy (production — permanent URL)
 ```powershell
@@ -43,7 +48,7 @@ ai-assets-toolbox/
 ├── deploy.ps1           # Production deploy (permanent URL)
 ├── serve.ps1            # Dev server with hot-reload (temporary URL)
 ├── scripts/
-│   └── common.ps1       # Shared auto-setup logic (Python, Modal, auth, secrets, volumes)
+│   └── common.ps1       # Shared auto-setup logic (Python, Modal, auth, volumes)
 └── src/
     ├── app.py           # Main entrypoint (modal deploy src/app.py)
     ├── app_config.py    # Shared Modal app, images, volumes
@@ -51,8 +56,12 @@ ai-assets-toolbox/
     ├── gpu/
     │   ├── caption.py   # CaptionService (Qwen3-VL-2B on T4)
     │   └── upscale.py   # UpscaleService (SDXL on A10G)
+    ├── services/
+    │   ├── download.py        # DownloadService (CPU, HuggingFace → Volume)
+    │   └── model_registry.py  # Model definitions and Volume paths
     └── ui/
-        └── gradio_app.py # Gradio web interface
+        ├── gradio_app.py  # Gradio web interface
+        └── setup_wizard.py # First-time setup wizard (API keys + model downloads)
 ```
 
 ## Cost

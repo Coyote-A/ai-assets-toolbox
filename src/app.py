@@ -5,15 +5,19 @@ Deploy:  modal deploy src/app.py
 Dev:     modal serve src/app.py
 
 This single entrypoint registers:
-  - CaptionService  (T4 GPU)   — Qwen3-VL-2B image captioning
-  - UpscaleService  (A10G GPU)  — SDXL tile-based upscaling
-  - Gradio web UI   (CPU)       — served at the app's URL
+  - CaptionService   (T4 GPU)   — Qwen3-VL-2B image captioning
+  - UpscaleService   (A10G GPU)  — SDXL tile-based upscaling
+  - DownloadService  (CPU)       — model downloads from HuggingFace to Volume
+  - Gradio web UI    (CPU)       — served at the app's URL
 """
 import modal
 from src.app_config import app, gradio_image
 
 # Import GPU services to register them with the app
 from src.gpu import CaptionService, UpscaleService  # noqa: F401
+
+# Import DownloadService to register it with the app
+from src.services.download import DownloadService  # noqa: F401
 
 # Import Gradio app creator
 from src.ui import create_gradio_app

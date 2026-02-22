@@ -13,6 +13,13 @@ classes from ``src.gpu.*`` to trigger their registration, then deploys with:
 
 import modal
 
+from src.services.model_registry import (
+    LORAS_MOUNT_PATH,
+    LORAS_VOLUME_NAME,
+    MODELS_MOUNT_PATH,
+    MODELS_VOLUME_NAME,
+)
+
 # ---------------------------------------------------------------------------
 # Shared Modal app
 # ---------------------------------------------------------------------------
@@ -20,24 +27,10 @@ import modal
 app = modal.App("ai-toolbox")
 
 # ---------------------------------------------------------------------------
-# Constants — model paths baked into the container images at build time
-# ---------------------------------------------------------------------------
-
-_CAPTION_MODEL_REPO = "Qwen/Qwen3-VL-2B-Instruct"
-_CAPTION_MODEL_PATH = "/app/models/qwen3-vl-2b"
-
-_MODELS_DIR = "/app/models"
-_ILLUSTRIOUS_XL_PATH = f"{_MODELS_DIR}/illustrious-xl/Illustrious-XL-v2.0.safetensors"
-_CONTROLNET_TILE_PATH = f"{_MODELS_DIR}/controlnet-tile"
-_SDXL_VAE_PATH = f"{_MODELS_DIR}/sdxl-vae"
-_IP_ADAPTER_PATH = f"{_MODELS_DIR}/ip-adapter/ip-adapter-plus_sdxl_vit-h.safetensors"
-_CLIP_VIT_H_PATH = f"{_MODELS_DIR}/clip-vit-h"
-
-# ---------------------------------------------------------------------------
 # Caption image
 # ---------------------------------------------------------------------------
-# Qwen3-VL-2B-Instruct weights (~4 GB) are downloaded at image-build time so
-# cold starts never need to fetch weights from HuggingFace.
+# Lightweight pip-only image — model weights are loaded from the models volume
+# at runtime (mounted at MODELS_MOUNT_PATH).
 
 caption_image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -55,27 +48,17 @@ caption_image = (
         "sentencepiece",
         "huggingface_hub",
     )
-    # Download Qwen3-VL-2B-Instruct weights into the image layer at build time.
-    # snapshot_download fetches all model files (config, tokenizer, weights)
-    # and stores them at _CAPTION_MODEL_PATH so the container never needs
-    # network access to HuggingFace at runtime.
-    .run_commands(
-        f"python -c \""
-        f"from huggingface_hub import snapshot_download; "
-        f"snapshot_download('{_CAPTION_MODEL_REPO}', local_dir='{_CAPTION_MODEL_PATH}')"
-        f"\""
-    )
     # Mount the local `src` package so that `from src.xxx import ...` works
-    # inside the container.  Placed last so code changes don't bust the
-    # expensive model-download cache layers above.
+    # inside the container.
     .add_local_python_source("src")
 )
 
 # ---------------------------------------------------------------------------
 # Upscale image
 # ---------------------------------------------------------------------------
-# All model weights (Illustrious-XL, ControlNet Tile, SDXL VAE, IP-Adapter,
-# CLIP ViT-H) are downloaded at image-build time.
+# Lightweight pip-only image — all model weights (Illustrious-XL, ControlNet
+# Tile, SDXL VAE, IP-Adapter, CLIP ViT-H) are loaded from the models volume
+# at runtime (mounted at MODELS_MOUNT_PATH).
 
 upscale_image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -96,59 +79,8 @@ upscale_image = (
         "huggingface_hub",
         "requests",
     )
-    # -----------------------------------------------------------------------
-    # Download Illustrious-XL v2.0 single-file checkpoint
-    # -----------------------------------------------------------------------
-    .run_commands(
-        f"mkdir -p {_MODELS_DIR}/illustrious-xl && "
-        f"wget -q -O {_ILLUSTRIOUS_XL_PATH} "
-        f"'https://huggingface.co/OnomaAIResearch/Illustrious-XL-v2.0/resolve/main/Illustrious-XL-v2.0.safetensors'"
-    )
-    # -----------------------------------------------------------------------
-    # Download ControlNet Tile SDXL (xinsir/controlnet-tile-sdxl-1.0)
-    # -----------------------------------------------------------------------
-    .run_commands(
-        f"mkdir -p {_CONTROLNET_TILE_PATH} && "
-        f"python -c \""
-        f"from huggingface_hub import hf_hub_download; "
-        f"hf_hub_download('xinsir/controlnet-tile-sdxl-1.0', 'config.json', local_dir='{_CONTROLNET_TILE_PATH}'); "
-        f"hf_hub_download('xinsir/controlnet-tile-sdxl-1.0', 'diffusion_pytorch_model.safetensors', local_dir='{_CONTROLNET_TILE_PATH}')"
-        f"\""
-    )
-    # -----------------------------------------------------------------------
-    # Download SDXL VAE fp16-fix (madebyollin/sdxl-vae-fp16-fix)
-    # -----------------------------------------------------------------------
-    .run_commands(
-        f"mkdir -p {_SDXL_VAE_PATH} && "
-        f"python -c \""
-        f"from huggingface_hub import hf_hub_download; "
-        f"hf_hub_download('madebyollin/sdxl-vae-fp16-fix', 'config.json', local_dir='{_SDXL_VAE_PATH}'); "
-        f"hf_hub_download('madebyollin/sdxl-vae-fp16-fix', 'diffusion_pytorch_model.safetensors', local_dir='{_SDXL_VAE_PATH}')"
-        f"\""
-    )
-    # -----------------------------------------------------------------------
-    # Download IP-Adapter Plus SDXL ViT-H
-    # -----------------------------------------------------------------------
-    .run_commands(
-        f"mkdir -p {_MODELS_DIR}/ip-adapter && "
-        f"wget -q -O {_IP_ADAPTER_PATH} "
-        f"'https://huggingface.co/h94/IP-Adapter/resolve/main/sdxl_models/ip-adapter-plus_sdxl_vit-h.safetensors'"
-    )
-    # -----------------------------------------------------------------------
-    # Download CLIP ViT-H-14 (laion/CLIP-ViT-H-14-laion2B-s32B-b79K)
-    # -----------------------------------------------------------------------
-    .run_commands(
-        f"mkdir -p {_CLIP_VIT_H_PATH} && "
-        f"python -c \""
-        f"from huggingface_hub import hf_hub_download; "
-        f"hf_hub_download('laion/CLIP-ViT-H-14-laion2B-s32B-b79K', 'config.json', local_dir='{_CLIP_VIT_H_PATH}'); "
-        f"hf_hub_download('laion/CLIP-ViT-H-14-laion2B-s32B-b79K', 'model.safetensors', local_dir='{_CLIP_VIT_H_PATH}'); "
-        f"hf_hub_download('laion/CLIP-ViT-H-14-laion2B-s32B-b79K', 'preprocessor_config.json', local_dir='{_CLIP_VIT_H_PATH}')"
-        f"\""
-    )
     # Mount the local `src` package so that `from src.xxx import ...` works
-    # inside the container.  Placed last so code changes don't bust the
-    # expensive model-download cache layers above.
+    # inside the container.
     .add_local_python_source("src")
 )
 
@@ -171,10 +103,28 @@ gradio_image = (
 )
 
 # ---------------------------------------------------------------------------
-# Persistent LoRA volume
+# Download image (lightweight CPU-only container for the download service)
 # ---------------------------------------------------------------------------
-# LoRA .safetensors files uploaded by the user are stored here and survive
-# container restarts.  The volume is mounted at /vol/loras inside the upscale
-# container.
+# Used by the setup-wizard DownloadService to fetch model weights from
+# HuggingFace and write them to the models volume.
 
-lora_volume = modal.Volume.from_name("ai-toolbox-loras", create_if_missing=True)
+download_image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .pip_install(
+        "huggingface_hub[hf_transfer]>=0.25",
+        "requests>=2.31",
+        "safetensors>=0.4",
+    )
+    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
+    .add_local_python_source("src")
+)
+
+# ---------------------------------------------------------------------------
+# Persistent volumes
+# ---------------------------------------------------------------------------
+# models_volume — base model weights downloaded by the setup wizard.
+# lora_volume   — LoRA .safetensors files uploaded by the user.
+# Both survive container restarts.
+
+models_volume = modal.Volume.from_name(MODELS_VOLUME_NAME, create_if_missing=True)
+lora_volume = modal.Volume.from_name(LORAS_VOLUME_NAME, create_if_missing=True)

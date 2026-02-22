@@ -3,8 +3,9 @@ Upscale service — Illustrious-XL + ControlNet Tile on a Modal A10G GPU contain
 
 This module is part of the unified Modal app (``modal.App("ai-toolbox")``).
 It does NOT define its own ``modal.App``; instead it imports ``app``,
-``upscale_image``, and ``lora_volume`` from ``src.app_config`` and registers
-``UpscaleService`` against that shared app via ``@app.cls()``.
+``upscale_image``, ``models_volume``, and ``lora_volume`` from
+``src.app_config`` and registers ``UpscaleService`` against that shared app
+via ``@app.cls()``.
 
 Design decisions vs. the old ``modal/upscale_app.py``
 ------------------------------------------------------
@@ -52,7 +53,12 @@ from typing import Any, Optional
 
 import modal
 
-from src.app_config import app, upscale_image, lora_volume
+from src.app_config import app, upscale_image, lora_volume, models_volume
+from src.services.model_registry import (
+    LORAS_MOUNT_PATH,
+    MODELS_MOUNT_PATH,
+    get_model_path,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -65,22 +71,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Constants — model paths baked into the container image at build time
+# Constants — model paths resolved from the models volume at runtime
 # ---------------------------------------------------------------------------
-
-MODELS_DIR = "/app/models"
-
-ILLUSTRIOUS_XL_PATH = f"{MODELS_DIR}/illustrious-xl/Illustrious-XL-v2.0.safetensors"
-CONTROLNET_TILE_PATH = f"{MODELS_DIR}/controlnet-tile"
-SDXL_VAE_PATH = f"{MODELS_DIR}/sdxl-vae"
-IP_ADAPTER_PATH = f"{MODELS_DIR}/ip-adapter/ip-adapter-plus_sdxl_vit-h.safetensors"
-CLIP_VIT_H_PATH = f"{MODELS_DIR}/clip-vit-h"
 
 # LoRA volume mount point (must match the volumes= dict in @app.cls)
-LORAS_DIR = "/vol/loras"
+LORAS_DIR = LORAS_MOUNT_PATH  # /vol/loras
 
 # ---------------------------------------------------------------------------
-# Hardcoded CivitAI LoRAs — downloaded to the volume on first container start
+# Hardcoded CivitAI LoRAs — metadata only; files are downloaded via the UI
+# wizard / download service, NOT at container startup.
 # ---------------------------------------------------------------------------
 
 HARDCODED_LORAS: dict[str, dict[str, Any]] = {
@@ -105,14 +104,15 @@ HARDCODED_LORAS: dict[str, dict[str, Any]] = {
     # A10G has 24 GB VRAM — enough for SDXL + ControlNet + IP-Adapter with CPU offload.
     gpu="A10G",
     image=upscale_image,
-    # Pull CivitAI token from the named Modal secret store.
-    secrets=[modal.Secret.from_name("ai-toolbox-secrets")],
     # Keep the container alive for 5 minutes after the last request.
     scaledown_window=300,
     # Hard timeout per request (10 minutes for large tile batches).
     timeout=600,
-    # Mount the LoRA volume at /vol/loras/
-    volumes={LORAS_DIR: lora_volume},
+    # Mount the models volume at /vol/models/ and the LoRA volume at /vol/loras/
+    volumes={
+        MODELS_MOUNT_PATH: models_volume,
+        LORAS_DIR: lora_volume,
+    },
 )
 class UpscaleService:
     """
@@ -170,12 +170,54 @@ class UpscaleService:
 
         logger.info("=== UpscaleService: loading models ===")
 
+        # Reload the volume to pick up any newly downloaded model weights.
+        models_volume.reload()
+
+        # ------------------------------------------------------------------
+        # Guard: abort gracefully if required models are not yet downloaded.
+        # ------------------------------------------------------------------
+        required_models = [
+            "illustrious-xl",
+            "controlnet-tile",
+            "sdxl-vae",
+            "ip-adapter",
+            "clip-vit-h",
+        ]
+        missing = [k for k in required_models if not os.path.exists(get_model_path(k))]
+        if missing:
+            logger.warning(
+                "Missing models: %s — run setup wizard first", missing
+            )
+            self._models_ready = False
+            return
+
+        self._models_ready = True
+
+        # Resolve model paths from the volume.
+        illustrious_xl_dir = get_model_path("illustrious-xl")
+        controlnet_tile_path = get_model_path("controlnet-tile")
+        sdxl_vae_path = get_model_path("sdxl-vae")
+        ip_adapter_dir = get_model_path("ip-adapter")
+        clip_vit_h_path = get_model_path("clip-vit-h")
+
+        # The Illustrious-XL model is a single safetensors file downloaded via
+        # hf_hub_download into the local_dir.  The registry records the filename
+        # as "Illustrious-XL-v0.1.safetensors".
+        illustrious_xl_path = os.path.join(
+            illustrious_xl_dir, "Illustrious-XL-v0.1.safetensors"
+        )
+
+        # The IP-Adapter weight file lives inside the ip-adapter directory.
+        ip_adapter_path = os.path.join(
+            ip_adapter_dir, "ip-adapter-plus_sdxl_vit-h.safetensors"
+        )
+
         # ------------------------------------------------------------------
         # 1. Load VAE fp16-fix
         # ------------------------------------------------------------------
-        logger.info("Loading SDXL VAE fp16-fix from '%s'", SDXL_VAE_PATH)
+        logger.info("Loading SDXL VAE fp16-fix from '%s'", sdxl_vae_path)
         vae = AutoencoderKL.from_pretrained(
-            SDXL_VAE_PATH,
+            sdxl_vae_path,
             torch_dtype=torch.float16,
             local_files_only=True,
         )
@@ -184,9 +226,9 @@ class UpscaleService:
         # ------------------------------------------------------------------
         # 2. Load ControlNet Tile
         # ------------------------------------------------------------------
-        logger.info("Loading ControlNet Tile from '%s'", CONTROLNET_TILE_PATH)
+        logger.info("Loading ControlNet Tile from '%s'", controlnet_tile_path)
         controlnet = ControlNetModel.from_pretrained(
-            CONTROLNET_TILE_PATH,
+            controlnet_tile_path,
             torch_dtype=torch.float16,
             local_files_only=True,
         )
@@ -196,9 +238,9 @@ class UpscaleService:
         # 3. Load SDXL pipeline from single-file checkpoint, then wrap with
         #    ControlNet using from_pipe() (avoids double-loading UNet weights)
         # ------------------------------------------------------------------
-        logger.info("Loading SDXL base pipeline from '%s'", ILLUSTRIOUS_XL_PATH)
+        logger.info("Loading SDXL base pipeline from '%s'", illustrious_xl_path)
         base_pipe = StableDiffusionXLImg2ImgPipeline.from_single_file(
-            ILLUSTRIOUS_XL_PATH,
+            illustrious_xl_path,
             torch_dtype=torch.float16,
             use_safetensors=True,
             vae=vae,
@@ -235,15 +277,15 @@ class UpscaleService:
         self._ip_adapter_loaded: bool = False
         logger.info(
             "Loading IP-Adapter from '%s' with CLIP encoder '%s'",
-            IP_ADAPTER_PATH,
-            CLIP_VIT_H_PATH,
+            ip_adapter_path,
+            clip_vit_h_path,
         )
         try:
             self._pipe.load_ip_adapter(
-                os.path.dirname(IP_ADAPTER_PATH),
+                os.path.dirname(ip_adapter_path),
                 subfolder="",
-                weight_name=os.path.basename(IP_ADAPTER_PATH),
-                image_encoder_folder=CLIP_VIT_H_PATH,
+                weight_name=os.path.basename(ip_adapter_path),
+                image_encoder_folder=clip_vit_h_path,
             )
             # Move the image encoder to CUDA so it matches the pipeline device.
             # Without this the encoder stays on CPU while the pipeline runs on
@@ -260,11 +302,6 @@ class UpscaleService:
             logger.warning(
                 "Failed to load IP-Adapter at startup — will proceed without it: %s", exc
             )
-
-        # ------------------------------------------------------------------
-        # 8. Download hardcoded CivitAI LoRAs to the volume (if missing)
-        # ------------------------------------------------------------------
-        _ensure_loras_downloaded(LORAS_DIR, lora_volume)
 
         logger.info("=== UpscaleService: all models loaded ===")
 
@@ -333,9 +370,16 @@ class UpscaleService:
 
         Raises
         ------
+        RuntimeError
+            If models have not been downloaded yet.
         ValueError
             If ``tiles`` is empty.
         """
+        if not getattr(self, "_models_ready", False):
+            raise RuntimeError(
+                "Models not downloaded. Please run the setup wizard first."
+            )
+
         if not tiles:
             raise ValueError("'tiles' list must not be empty")
 
@@ -515,9 +559,16 @@ class UpscaleService:
 
         Raises
         ------
+        RuntimeError
+            If models have not been downloaded yet.
         ValueError
             If ``source_image_bytes`` or ``regions`` is empty.
         """
+        if not getattr(self, "_models_ready", False):
+            raise RuntimeError(
+                "Models not downloaded. Please run the setup wizard first."
+            )
+
         if not source_image_bytes:
             raise ValueError("'source_image_bytes' must not be empty")
         if not regions:
@@ -853,8 +904,8 @@ class UpscaleService:
         -------
         dict
             Keys: ``status``, ``gpu``, ``vram_total_gb``, ``vram_used_gb``,
-            ``model_loaded``, ``ip_adapter_loaded``, ``loras_dir``,
-            ``loras_storage_free_gb``.
+            ``model_loaded``, ``models_ready``, ``ip_adapter_loaded``,
+            ``loras_dir``, ``loras_storage_free_gb``.
         """
         import torch
 
@@ -880,6 +931,7 @@ class UpscaleService:
             "vram_total_gb": vram_total_gb,
             "vram_used_gb": vram_used_gb,
             "model_loaded": hasattr(self, "_pipe") and self._pipe is not None,
+            "models_ready": getattr(self, "_models_ready", False),
             "ip_adapter_loaded": getattr(self, "_ip_adapter_loaded", False),
             "loras_dir": LORAS_DIR,
             "loras_storage_free_gb": loras_available_gb,
@@ -905,19 +957,25 @@ class UpscaleService:
             return
 
         # Fallback: startup load failed — attempt to load now.
+        ip_adapter_dir = get_model_path("ip-adapter")
+        ip_adapter_path = os.path.join(
+            ip_adapter_dir, "ip-adapter-plus_sdxl_vit-h.safetensors"
+        )
+        clip_vit_h_path = get_model_path("clip-vit-h")
+
         logger.info(
             "IP-Adapter not loaded at startup — attempting lazy load "
             "(scale=%.2f) from '%s' with CLIP encoder '%s'",
             scale,
-            IP_ADAPTER_PATH,
-            CLIP_VIT_H_PATH,
+            ip_adapter_path,
+            clip_vit_h_path,
         )
         try:
             self._pipe.load_ip_adapter(
-                os.path.dirname(IP_ADAPTER_PATH),
+                os.path.dirname(ip_adapter_path),
                 subfolder="",
-                weight_name=os.path.basename(IP_ADAPTER_PATH),
-                image_encoder_folder=CLIP_VIT_H_PATH,
+                weight_name=os.path.basename(ip_adapter_path),
+                image_encoder_folder=clip_vit_h_path,
             )
             # Ensure the image encoder is on CUDA to avoid device-mismatch errors.
             if hasattr(self._pipe, "image_encoder") and self._pipe.image_encoder is not None:
@@ -1006,6 +1064,7 @@ def _apply_loras(pipe: Any, loras: list[dict], loras_dir: str) -> list[str]:
     """
     adapter_names: list[str] = []
     adapter_weights: list[float] = []
+    failed_adapters: list[str] = []
 
     for lora in loras:
         name: str = lora.get("name", "")
@@ -1032,14 +1091,24 @@ def _apply_loras(pipe: Any, loras: list[dict], loras_dir: str) -> list[str]:
             pipe.load_lora_weights(lora_path, adapter_name=name)
             adapter_names.append(name)
             adapter_weights.append(weight)
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.warning("Failed to load LoRA '%s': %s", name, exc)
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning("Failed to load LoRA '%s': %s — skipping", name, e)
+            failed_adapters.append(name)
+            continue
 
-    if adapter_names:
-        logger.info("Activating adapters: %s with weights %s", adapter_names, adapter_weights)
-        pipe.set_adapters(adapter_names, adapter_weights)
+    # Filter out any failed adapters before activating
+    active_names = [n for n in adapter_names if n not in failed_adapters]
+    active_weights = [
+        w for n, w in zip(adapter_names, adapter_weights) if n not in failed_adapters
+    ]
 
-    return adapter_names
+    if active_names:
+        logger.info(
+            "Activating adapters: %s with weights %s", active_names, active_weights
+        )
+        pipe.set_adapters(active_names, active_weights)
+
+    return active_names
 
 
 def _remove_loras(pipe: Any, adapter_names: list[str]) -> None:
@@ -1236,154 +1305,3 @@ def _run_sdxl(
     output_image = result.images[0]
     logger.info("SDXL generation complete")
     return output_image
-
-
-def _ensure_loras_downloaded(loras_dir: str, volume: Any) -> None:
-    """
-    Download the hardcoded CivitAI LoRAs into *loras_dir* if not already present.
-
-    Reads ``CIVITAI_API_TOKEN`` from the environment.  If the token is missing
-    or a download fails the function logs a warning and continues rather than
-    raising an exception.
-
-    Uses the CivitAI v1 models API to resolve the latest download URL for each
-    model, then streams the file to disk.
-
-    Parameters
-    ----------
-    loras_dir:
-        Local path where LoRA files should be stored (e.g. ``/vol/loras``).
-    volume:
-        The ``modal.Volume`` instance to commit after downloading new files.
-    """
-    import requests
-
-    token = os.environ.get("CIVITAI_API_TOKEN", "")
-    if not token:
-        logger.warning(
-            "CIVITAI_API_TOKEN is not set — hardcoded LoRAs will not be downloaded"
-        )
-
-    os.makedirs(loras_dir, exist_ok=True)
-
-    for ui_name, info in HARDCODED_LORAS.items():
-        dest_path = os.path.join(loras_dir, info["filename"])
-        if os.path.isfile(dest_path):
-            logger.info(
-                "LoRA '%s' already exists at '%s' — skipping download",
-                ui_name,
-                dest_path,
-            )
-            continue
-
-        if not token:
-            logger.warning(
-                "Skipping download of LoRA '%s' (model_id=%s) — no CivitAI API token",
-                ui_name,
-                info["civitai_model_id"],
-            )
-            continue
-
-        # Resolve download URL via CivitAI API
-        model_id = info["civitai_model_id"]
-        api_url = f"https://civitai.com/api/v1/models/{model_id}"
-        logger.info(
-            "Fetching CivitAI model info for '%s' (model_id=%s) from %s",
-            ui_name,
-            model_id,
-            api_url,
-        )
-
-        try:
-            api_resp = requests.get(
-                api_url,
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=30,
-            )
-            api_resp.raise_for_status()
-            model_data = api_resp.json()
-
-            # Get the first model version's first file download URL
-            model_versions = model_data.get("modelVersions", [])
-            if not model_versions:
-                logger.warning(
-                    "No model versions found for LoRA '%s' (model_id=%s)",
-                    ui_name,
-                    model_id,
-                )
-                continue
-
-            latest_version = model_versions[0]
-            files = latest_version.get("files", [])
-            if not files:
-                logger.warning(
-                    "No files found for LoRA '%s' (model_id=%s, version_id=%s)",
-                    ui_name,
-                    model_id,
-                    latest_version.get("id"),
-                )
-                continue
-
-            # Prefer the primary file (type == "Model") if available
-            primary_file = next(
-                (f for f in files if f.get("type") == "Model"),
-                files[0],
-            )
-            download_url = primary_file.get("downloadUrl", "")
-            if not download_url:
-                logger.warning(
-                    "No downloadUrl for LoRA '%s' (model_id=%s)",
-                    ui_name,
-                    model_id,
-                )
-                continue
-
-            # Append token to download URL
-            sep = "&" if "?" in download_url else "?"
-            download_url_with_token = f"{download_url}{sep}token={token}"
-
-            logger.info(
-                "Downloading LoRA '%s' from CivitAI → '%s'",
-                ui_name,
-                dest_path,
-            )
-            dl_resp = requests.get(
-                download_url_with_token,
-                stream=True,
-                allow_redirects=True,
-                timeout=300,
-            )
-            dl_resp.raise_for_status()
-
-            with open(dest_path, "wb") as fh:
-                for chunk in dl_resp.iter_content(chunk_size=8192):
-                    if chunk:
-                        fh.write(chunk)
-
-            file_size = os.path.getsize(dest_path)
-            logger.info(
-                "LoRA '%s' downloaded successfully (%d bytes)",
-                ui_name,
-                file_size,
-            )
-
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.error(
-                "Failed to download LoRA '%s' (model_id=%s): %s",
-                ui_name,
-                model_id,
-                exc,
-            )
-            # Remove partial file if it exists
-            if os.path.isfile(dest_path):
-                try:
-                    os.remove(dest_path)
-                except OSError:
-                    pass
-
-    # Commit any newly downloaded files to the volume
-    try:
-        volume.commit()
-        logger.info("LoRA volume committed after startup downloads")
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.warning("Could not commit LoRA volume: %s", exc)

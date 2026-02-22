@@ -161,71 +161,18 @@ function Ensure-Setup {
     }
 
     # -------------------------------------------------------------------------
-    # STEP 5: Modal secret 'ai-toolbox-secrets'
+    # STEP 5: Modal volumes
     # -------------------------------------------------------------------------
-    Write-Step "Checking Modal secret 'ai-toolbox-secrets'"
+    Write-Step "Ensuring Modal volumes exist"
 
-    $secretName = "ai-toolbox-secrets"
-    $secretExists = $false
+    # Create volumes (idempotent — modal volume create is a no-op if already exists)
+    Write-Host "  Creating ai-toolbox-models volume..." -ForegroundColor White
+    modal volume create ai-toolbox-models 2>$null
+    Write-Ok "Volume 'ai-toolbox-models' ready."
 
-    try {
-        $secrets = modal secret list 2>&1
-        if ($secrets -match $secretName) {
-            $secretExists = $true
-        }
-    } catch {
-        Write-Err "Failed to list Modal secrets: $_"
-        exit 1
-    }
+    Write-Host "  Creating ai-toolbox-loras volume..." -ForegroundColor White
+    modal volume create ai-toolbox-loras 2>$null
+    Write-Ok "Volume 'ai-toolbox-loras' ready."
 
-    if ($secretExists) {
-        Write-Skip "Secret '$secretName' already configured"
-    } else {
-        Write-Info "Secret '$secretName' not found. You need a CivitAI API token."
-        Write-Info "Get your token at: https://civitai.com/user/account (API Keys section)"
-        Write-Host ""
-        $civitaiToken = Read-Host "  Enter your CivitAI API token"
-        if ([string]::IsNullOrWhiteSpace($civitaiToken)) {
-            Write-Err "No token provided. Cannot create secret."
-            exit 1
-        }
-        try {
-            modal secret create $secretName "CIVITAI_API_TOKEN=$civitaiToken"
-            Write-Ok "Secret '$secretName' created."
-        } catch {
-            Write-Err "Failed to create secret: $_"
-            exit 1
-        }
-    }
-
-    # -------------------------------------------------------------------------
-    # STEP 6: Modal volume 'ai-toolbox-loras'
-    # -------------------------------------------------------------------------
-    Write-Step "Checking Modal volume 'ai-toolbox-loras'"
-
-    $volumeName = "ai-toolbox-loras"
-    $volumeExists = $false
-
-    try {
-        $volumes = modal volume list 2>&1
-        if ($volumes -match $volumeName) {
-            $volumeExists = $true
-        }
-    } catch {
-        Write-Err "Failed to list Modal volumes: $_"
-        exit 1
-    }
-
-    if ($volumeExists) {
-        Write-Skip "Volume '$volumeName' already exists"
-    } else {
-        Write-Info "Creating Modal volume '$volumeName'..."
-        try {
-            modal volume create $volumeName
-            Write-Ok "Volume '$volumeName' created."
-        } catch {
-            Write-Err "Failed to create volume: $_"
-            exit 1
-        }
-    }
+    Write-Info "API keys (CivitAI, HuggingFace) are configured through the setup wizard in the browser UI."
 }

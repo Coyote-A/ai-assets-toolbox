@@ -2,13 +2,14 @@
 
 ## Overview
 
-The AI Assets Toolbox runs entirely on Modal.com as a single unified app. One command deploys all three components:
+The AI Assets Toolbox runs entirely on Modal.com as a single unified app. One command deploys all components:
 
 | Component | Type | GPU | Idle Timeout |
 |-----------|------|-----|-------------|
 | `web_ui` | Gradio ASGI | CPU | 10 min |
 | `CaptionService` | Modal class | T4 | 5 min |
 | `UpscaleService` | Modal class | A10G | 5 min |
+| `DownloadService` | Modal class | CPU | 5 min |
 
 ## Deployment Scripts
 
@@ -37,20 +38,33 @@ Both scripts call `Ensure-Setup` from `scripts/common.ps1` before launching Moda
 2. **Checks pip** — bootstraps via `ensurepip` if missing
 3. **Installs / upgrades Modal CLI** — `pip install --upgrade modal`
 4. **Checks Modal authentication** — opens browser login if not authenticated
-5. **Creates `ai-toolbox-secrets`** — prompts for `CIVITAI_API_TOKEN` if missing
-6. **Creates `ai-toolbox-loras` volume** — creates the Modal volume if missing
+5. **Creates Modal volumes** — creates `ai-toolbox-models` and `ai-toolbox-loras` if missing
 
 All steps are idempotent — already-done steps are skipped.
+
+> **No secrets needed at deploy time.** API keys (CivitAI, HuggingFace) are entered through the
+> setup wizard in the browser UI and stored in browser `localStorage` via Gradio `BrowserState`.
+
+## First-Time Setup Wizard
+
+On first visit to the deployed URL, the app shows a **Setup Wizard** before the main UI:
+
+1. **API Keys** — Enter your CivitAI and/or HuggingFace tokens (stored in browser only, never sent to a server)
+2. **Model Downloads** — Select which models to download; the wizard calls `DownloadService` to fetch them from HuggingFace into the `ai-toolbox-models` Modal Volume
+3. **Progress** — Real-time download progress is streamed back to the browser
+
+On subsequent visits the wizard is skipped automatically if models are already present in the Volume.
 
 ## How It Works
 
 `src/app.py` is the single entrypoint. It:
 
 1. Imports `app` from `src/app_config.py` — the shared `modal.App("ai-toolbox")` instance.
-2. Imports `CaptionService` and `UpscaleService` from `src/gpu/` — this registers them with the app via their `@app.cls()` decorators.
-3. Defines `web_ui()` — a `@modal.asgi_app()` function that returns the Gradio `Blocks` instance.
+2. Imports `CaptionService` and `UpscaleService` from `src/gpu/` — registers them via `@app.cls()`.
+3. Imports `DownloadService` from `src/services/download` — registers the CPU download worker.
+4. Defines `web_ui()` — a `@modal.asgi_app()` function that returns the Gradio `Blocks` instance.
 
-All three components share the same app, so `modal deploy src/app.py` deploys everything at once.
+All components share the same app, so `modal deploy src/app.py` deploys everything at once.
 
 ## Container Images
 
@@ -58,9 +72,24 @@ Images are built once and cached. Rebuilds only happen when `src/app_config.py` 
 
 | Image | Contents | Build time |
 |-------|----------|-----------|
-| `caption_image` | PyTorch + Transformers + Qwen3-VL-2B weights (~4 GB) | ~10 min |
-| `upscale_image` | PyTorch + Diffusers + all model weights (~15 GB) | ~20 min |
+| `caption_image` | PyTorch + Transformers (no weights baked in) | ~3 min |
+| `upscale_image` | PyTorch + Diffusers (no weights baked in) | ~5 min |
 | `gradio_image` | Gradio + Pillow + NumPy (no GPU libs) | ~2 min |
+
+> **Fast deploys.** Model weights are stored in the `ai-toolbox-models` Modal Volume, not baked
+> into Docker images. Deploy is now pip-only — no 17 GB model downloads on every image rebuild.
+
+## Volume-Based Model Storage
+
+Models are stored in the `ai-toolbox-models` Modal Volume, mounted at `/vol/models` inside GPU containers.
+
+GPU services include a **readiness guard**: if the required model files are not yet present in the
+Volume, the service returns a clear error message prompting the user to run the setup wizard first.
+
+To inspect the models volume from the CLI:
+```bash
+modal volume ls ai-toolbox-models
+```
 
 ## LoRA Management
 
@@ -75,11 +104,6 @@ To upload a LoRA manually:
 ```bash
 modal volume put ai-toolbox-loras my-lora.safetensors /loras/my-lora.safetensors
 ```
-
-## Secrets
-
-The app uses the `ai-toolbox-secrets` Modal secret for:
-- `CIVITAI_API_TOKEN` — required for downloading LoRAs from CivitAI
 
 ## Logs
 

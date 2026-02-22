@@ -26,11 +26,13 @@ Public interface
 
 import io
 import logging
+import os
 from typing import Optional
 
 import modal
 
-from src.app_config import app, caption_image
+from src.app_config import app, caption_image, models_volume
+from src.services.model_registry import MODELS_MOUNT_PATH, get_model_path
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -45,8 +47,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-MODEL_PATH = "/app/models/qwen3-vl-2b"
 
 DEFAULT_SYSTEM_PROMPT = (
     "Describe the visual content of this image tile for a Stable Diffusion prompt. "
@@ -66,15 +66,14 @@ DEFAULT_SYSTEM_PROMPT = (
     # T4 has 16 GB VRAM; Qwen3-VL-2B in float16 uses ~4-5 GB — plenty of room.
     gpu="T4",
     image=caption_image,
-    # Pull CivitAI token and any other secrets from the named Modal secret store.
-    # The caption service itself does not need API_TOKEN — auth is handled by
-    # the Modal CLI token.  The secret is kept here for forward-compatibility.
-    secrets=[modal.Secret.from_name("ai-toolbox-secrets")],
     # Keep the container alive for 5 minutes after the last request so
     # subsequent requests skip the model-load overhead.
     scaledown_window=300,
     # Hard timeout per request (10 minutes is generous for batch tile jobs).
     timeout=600,
+    # Mount the models volume so weights downloaded by the setup wizard are
+    # accessible at MODELS_MOUNT_PATH (/vol/models).
+    volumes={MODELS_MOUNT_PATH: models_volume},
 )
 class CaptionService:
     """
@@ -128,16 +127,30 @@ class CaptionService:
         # "if class_name in extractors" KeyError on video_processing_auto.py.
         import qwen_vl_utils  # noqa: F401 — side-effect import
 
-        logger.info("Loading Qwen3-VL-2B from '%s'", MODEL_PATH)
+        # Reload the volume to pick up any newly downloaded model weights.
+        models_volume.reload()
+
+        model_dir = get_model_path("qwen3-vl-2b")
+
+        # Guard: abort gracefully if the model has not been downloaded yet.
+        if not os.path.exists(model_dir):
+            logger.warning(
+                "Caption model not found at %s — run setup wizard first", model_dir
+            )
+            self._models_ready = False
+            return
+
+        self._models_ready = True
+        logger.info("Loading Qwen3-VL-2B from '%s'", model_dir)
 
         self._model = Qwen3VLForConditionalGeneration.from_pretrained(
-            MODEL_PATH,
+            model_dir,
             torch_dtype=torch.float16,
             device_map="auto",
-            local_files_only=True,  # weights are baked into the image
+            local_files_only=True,
         )
         self._processor = AutoProcessor.from_pretrained(
-            MODEL_PATH,
+            model_dir,
             local_files_only=True,
         )
 
@@ -262,6 +275,8 @@ class CaptionService:
 
         Raises
         ------
+        RuntimeError
+            If models have not been downloaded yet.
         ValueError
             If ``tiles`` is empty.
 
@@ -275,6 +290,11 @@ class CaptionService:
             ])
             # {"0_0": "grass, trees, ...", "0_1": "water, rocks, ..."}
         """
+        if not getattr(self, "_models_ready", False):
+            raise RuntimeError(
+                "Models not downloaded. Please run the setup wizard first."
+            )
+
         if not tiles:
             raise ValueError("'tiles' list must not be empty")
 
@@ -320,7 +340,7 @@ class CaptionService:
         -------
         dict
             Keys: ``status``, ``gpu``, ``vram_total_gb``, ``vram_used_gb``,
-            ``model_loaded``, ``model_path``.
+            ``model_loaded``, ``model_path``, ``models_ready``.
         """
         import torch
 
@@ -336,6 +356,7 @@ class CaptionService:
             vram_used_gb = round((props.total_memory - free_bytes) / (1024 ** 3), 2)
 
         model_loaded = hasattr(self, "_model") and self._model is not None
+        model_path = get_model_path("qwen3-vl-2b")
 
         return {
             "status": "ok",
@@ -343,5 +364,6 @@ class CaptionService:
             "vram_total_gb": vram_total_gb,
             "vram_used_gb": vram_used_gb,
             "model_loaded": model_loaded,
-            "model_path": MODEL_PATH,
+            "model_path": model_path,
+            "models_ready": getattr(self, "_models_ready", False),
         }
