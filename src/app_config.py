@@ -11,6 +11,8 @@ classes from ``src.gpu.*`` to trigger their registration, then deploys with:
     modal deploy modal_app.py
 """
 
+from __future__ import annotations
+
 import modal
 
 from src.services.model_registry import (

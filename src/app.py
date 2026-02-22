@@ -10,6 +10,8 @@ This single entrypoint registers:
   - DownloadService  (CPU)       — model downloads from HuggingFace to Volume
   - Gradio web UI    (CPU)       — served at the app's URL
 """
+from __future__ import annotations
+
 import modal
 from src.app_config import app, gradio_image
 

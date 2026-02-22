@@ -23,6 +23,7 @@ Public interface
     Input:  ``[{"tile_id": "0_0", "image_bytes": <bytes>}, ...]``
     Output: ``{"0_0": "keyword1, keyword2, ..."}``
 """
+from __future__ import annotations
 
 import io
 import logging
