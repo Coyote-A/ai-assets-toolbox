@@ -163,16 +163,19 @@ function Ensure-Setup {
     # -------------------------------------------------------------------------
     # STEP 5: Modal volumes
     # -------------------------------------------------------------------------
-    Write-Step "Ensuring Modal volumes exist"
+    Write-Host "`n=== Ensuring Modal volumes exist ===" -ForegroundColor Cyan
 
-    # Create volumes (idempotent — modal volume create is a no-op if already exists)
-    Write-Host "  Creating ai-toolbox-models volume..." -ForegroundColor White
-    modal volume create ai-toolbox-models 2>$null
-    Write-Ok "Volume 'ai-toolbox-models' ready."
-
-    Write-Host "  Creating ai-toolbox-loras volume..." -ForegroundColor White
-    modal volume create ai-toolbox-loras 2>$null
-    Write-Ok "Volume 'ai-toolbox-loras' ready."
+    # Create volumes (ignore errors if they already exist)
+    foreach ($vol in @("ai-toolbox-models", "ai-toolbox-loras")) {
+        Write-Host "  Creating $vol volume..." -ForegroundColor Gray
+        $output = modal volume create $vol 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  Created $vol" -ForegroundColor Green
+        } else {
+            # Volume likely already exists — that's fine
+            Write-Host "  $vol already exists (OK)" -ForegroundColor DarkGray
+        }
+    }
 
     Write-Info "API keys (CivitAI, HuggingFace) are configured through the setup wizard in the browser UI."
 }
