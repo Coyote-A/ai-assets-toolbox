@@ -1,13 +1,43 @@
 """
-Client-side tile processing utilities for the AI Assets Toolbox frontend.
+Tiling utility module for the AI Assets Toolbox.
 
-All tiling and blending operations run locally; only individual tiles are
-sent to the RunPod backend for diffusion processing.
+Handles splitting images into overlapping tiles, merging processed tiles back
+into a full image with linear-gradient feathering, and grid visualisation.
+
+All operations work directly with PIL Images — no base64 encoding.
+This module is used by the Gradio UI (CPU container) before and after calling
+the GPU services via Modal ``.remote()``.
+
+Key functions
+-------------
+``calculate_tiles(image_size, tile_size, overlap)``
+    Calculate the tile grid for an image.
+
+``extract_tile(image, tile_info)``
+    Crop a single tile from the image.
+
+``extract_all_tiles(image, tile_size, overlap)``
+    Extract all tiles from an image.
+
+``blend_tiles(tiles, image_size, tile_size, overlap)``
+    Reassemble processed tiles into a full image with feathered blending.
+
+``calculate_offset_tiles(image_size, tile_size, overlap)``
+    Calculate a half-stride offset tile grid for the seam-removal pass.
+
+``blend_offset_pass(base_image, offset_tiles, offset_results, feather_size)``
+    Blend offset-pass tiles onto the base image using feathered masks.
+
+``draw_tile_grid(image, tiles, selected_indices, processed_indices)``
+    Draw a tile grid overlay on a copy of the image.
+
+``upscale_image(image, target_width, target_height)``
+    Bicubic upscale of an image to the target resolution.
 """
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -41,42 +71,6 @@ class TileInfo:
         return self.y + self.h
 
 
-@dataclass
-class RegionInfo:
-    """Describes a user-selected region for targeted upscaling."""
-    x: int          # left edge in the full image (pixels)
-    y: int          # top edge in the full image (pixels)
-    w: int          # region width (pixels)
-    h: int          # region height (pixels)
-    padding: int    # padding around the region in pixels
-    prompt: str     # prompt for this region
-    negative_prompt: str  # negative prompt for this region
-
-    @property
-    def region_id(self) -> str:
-        return f"region_{self.x}_{self.y}_{self.w}_{self.h}"
-
-    @property
-    def x2(self) -> int:
-        return self.x + self.w
-
-    @property
-    def y2(self) -> int:
-        return self.y + self.h
-
-    def to_dict(self) -> dict:
-        """Convert to dictionary for API payload."""
-        return {
-            "x": self.x,
-            "y": self.y,
-            "w": self.w,
-            "h": self.h,
-            "padding": self.padding,
-            "prompt": self.prompt,
-            "negative_prompt": self.negative_prompt,
-        }
-
-
 # ---------------------------------------------------------------------------
 # Grid calculation
 # ---------------------------------------------------------------------------
@@ -89,9 +83,8 @@ def calculate_tiles(
     """
     Calculate the tile grid for an image.
 
-    The image is first assumed to already be at the target resolution.
     Tiles are placed with the given overlap so that adjacent tiles share
-    `overlap` pixels on each shared edge.
+    ``overlap`` pixels on each shared edge.
 
     Args:
         image_size: (width, height) of the image in pixels.
@@ -100,12 +93,17 @@ def calculate_tiles(
 
     Returns:
         Ordered list of TileInfo objects (row-major order).
+
+    Raises:
+        ValueError: if overlap >= tile_size.
     """
     width, height = image_size
     stride = tile_size - overlap
 
     if stride <= 0:
-        raise ValueError(f"overlap ({overlap}) must be less than tile_size ({tile_size})")
+        raise ValueError(
+            f"overlap ({overlap}) must be less than tile_size ({tile_size})"
+        )
 
     # Number of tiles needed to cover the image
     num_cols = max(1, math.ceil((width - overlap) / stride))
@@ -155,6 +153,11 @@ def extract_all_tiles(
     """
     Extract all tiles from an image.
 
+    Args:
+        image:     source PIL Image.
+        tile_size: size of each square tile (default 1024).
+        overlap:   number of pixels shared between adjacent tiles (default 128).
+
     Returns:
         List of (TileInfo, PIL Image) pairs in row-major order.
     """
@@ -162,47 +165,53 @@ def extract_all_tiles(
     return [(t, extract_tile(image, t)) for t in tiles]
 
 
-def extract_region_image(
+def split_into_tiles(
     image: Image.Image,
-    x: int,
-    y: int,
-    w: int,
-    h: int,
-    padding: int = 0,
-) -> Image.Image:
+    tile_size: int = 1024,
+    overlap: int = 128,
+) -> List[dict]:
     """
-    Crop a region from the image with optional padding and bounds clamping.
+    Split an image into tiles and return a list of tile dicts.
+
+    This is the primary interface used by the Gradio UI workflow.  Each dict
+    contains the PIL Image and position metadata needed to reassemble the
+    result with :func:`merge_tiles`.
 
     Args:
-        image:   source PIL Image.
-        x, y:   top-left corner of the region.
-        w, h:   width/height of the region.
-        padding: extra pixels around the region (applied on all sides).
+        image:     source PIL Image.
+        tile_size: size of each square tile (default 1024).
+        overlap:   number of pixels shared between adjacent tiles (default 128).
 
     Returns:
-        Cropped PIL Image.
+        List of dicts, each with:
+        - ``"tile_id"`` (str): unique identifier, e.g. ``"0_0"``.
+        - ``"image"`` (PIL.Image.Image): the cropped tile.
+        - ``"info"`` (TileInfo): position metadata.
+        - ``"prompt_override"`` (None): placeholder for per-tile prompts.
     """
-    img_w, img_h = image.size
-    pad = max(0, int(padding))
-
-    left = max(0, int(x) - pad)
-    top = max(0, int(y) - pad)
-    right = min(img_w, int(x) + int(w) + pad)
-    bottom = min(img_h, int(y) + int(h) + pad)
-
-    if right < left:
-        right = left
-    if bottom < top:
-        bottom = top
-
-    return image.crop((left, top, right, bottom))
+    pairs = extract_all_tiles(image, tile_size=tile_size, overlap=overlap)
+    return [
+        {
+            "tile_id": tile_info.tile_id,
+            "image": tile_img,
+            "info": tile_info,
+            "prompt_override": None,
+        }
+        for tile_info, tile_img in pairs
+    ]
 
 
 # ---------------------------------------------------------------------------
 # Tile blending / reassembly
 # ---------------------------------------------------------------------------
 
-def _make_weight_map(h: int, w: int, overlap: int, tile_info: TileInfo, image_size: Tuple[int, int]) -> np.ndarray:
+def _make_weight_map(
+    h: int,
+    w: int,
+    overlap: int,
+    tile_info: TileInfo,
+    image_size: Tuple[int, int],
+) -> np.ndarray:
     """
     Build a 2-D float32 weight map for a tile using linear gradient feathering
     in the overlap regions on each edge that is shared with a neighbour.
@@ -236,59 +245,6 @@ def _make_weight_map(h: int, w: int, overlap: int, tile_info: TileInfo, image_si
     return weight
 
 
-def generate_mask_blur_preview(
-    tile_image: Image.Image,
-    tile_info: TileInfo,
-    overlap: int,
-    img_width: int,
-    img_height: int,
-) -> Image.Image:
-    """
-    Generate a visualization of the feathering/blend zones for a tile.
-
-    Areas where the weight map is less than 1.0 (i.e. the feathered overlap
-    edges) are tinted with a semi-transparent orange-red overlay so the user
-    can see which parts of the tile will be blended with neighbouring tiles.
-
-    Args:
-        tile_image: The tile's PIL Image (original or processed).
-        tile_info:  TileInfo describing this tile's position in the full image.
-        overlap:    Overlap in pixels used when the tile grid was calculated.
-        img_width:  Full image width in pixels.
-        img_height: Full image height in pixels.
-
-    Returns:
-        A new PIL Image (RGBA converted to RGB) with the feather zones
-        highlighted as a semi-transparent orange-red tint.
-    """
-    tile_rgb = tile_image.convert("RGB")
-    w, h = tile_rgb.size
-
-    # Build the weight map for this tile
-    weight = _make_weight_map(h, w, overlap, tile_info, (img_width, img_height))
-
-    # Create the overlay: pixels where weight < 1.0 get an orange-red tint.
-    # The tint intensity is proportional to (1 - weight) so the centre
-    # (weight == 1.0) is untouched and the deepest feather zone is most vivid.
-    tile_arr = np.array(tile_rgb, dtype=np.float32)  # (h, w, 3)
-
-    # Feather mask: 1.0 where fully feathered, 0.0 where no feathering
-    feather_mask = (1.0 - weight)  # (h, w), range [0, 1]
-
-    # Orange-red tint colour (R=255, G=120, B=0)
-    tint_r = np.full((h, w), 255.0, dtype=np.float32)
-    tint_g = np.full((h, w), 120.0, dtype=np.float32)
-    tint_b = np.full((h, w), 0.0,   dtype=np.float32)
-    tint = np.stack([tint_r, tint_g, tint_b], axis=-1)  # (h, w, 3)
-
-    # Blend: result = tile * (1 - alpha) + tint * alpha
-    # where alpha = feather_mask * 0.55  (max 55% opacity at the deepest edge)
-    alpha = (feather_mask * 0.55)[:, :, np.newaxis]  # (h, w, 1)
-    result_arr = tile_arr * (1.0 - alpha) + tint * alpha
-    result_arr = np.clip(result_arr, 0, 255).astype(np.uint8)
-    return Image.fromarray(result_arr, mode="RGB")
-
-
 def blend_tiles(
     tiles: List[Tuple[TileInfo, Image.Image]],
     image_size: Tuple[int, int],
@@ -304,18 +260,17 @@ def blend_tiles(
     Args:
         tiles:      list of (TileInfo, PIL Image) pairs.
         image_size: (width, height) of the target output image.
-        tile_size:  tile size used during extraction.
+        tile_size:  tile size used during extraction (unused but kept for API symmetry).
         overlap:    overlap used during extraction.
 
     Returns:
-        Reconstructed PIL Image.
+        Reconstructed PIL Image (RGB).
     """
     img_w, img_h = image_size
     accumulator = np.zeros((img_h, img_w, 3), dtype=np.float32)
     weight_sum = np.zeros((img_h, img_w, 1), dtype=np.float32)
 
     for tile_info, tile_img in tiles:
-        # Ensure tile is RGB
         tile_rgb = tile_img.convert("RGB")
         tile_arr = np.array(tile_rgb, dtype=np.float32)  # (h, w, 3)
 
@@ -332,6 +287,35 @@ def blend_tiles(
     weight_sum = np.where(weight_sum == 0, 1.0, weight_sum)
     result_arr = np.clip(accumulator / weight_sum, 0, 255).astype(np.uint8)
     return Image.fromarray(result_arr, mode="RGB")
+
+
+def merge_tiles(
+    tiles: List[dict],
+    output_width: int,
+    output_height: int,
+    overlap: int = 128,
+) -> Image.Image:
+    """
+    Merge processed tiles back into a full image with feathered blending.
+
+    This is the primary interface used by the Gradio UI workflow, complementing
+    :func:`split_into_tiles`.
+
+    Args:
+        tiles:         list of tile dicts, each with:
+                       - ``"info"`` (TileInfo): position metadata.
+                       - ``"image"`` (PIL.Image.Image): the processed tile.
+        output_width:  width of the target output image in pixels.
+        output_height: height of the target output image in pixels.
+        overlap:       overlap used during tile extraction.
+
+    Returns:
+        Merged PIL Image (RGB).
+    """
+    pairs: List[Tuple[TileInfo, Image.Image]] = [
+        (t["info"], t["image"]) for t in tiles
+    ]
+    return blend_tiles(pairs, (output_width, output_height), overlap=overlap)
 
 
 # ---------------------------------------------------------------------------
@@ -351,57 +335,51 @@ def calculate_offset_tiles(
     offset tile so that its centre straddles the seam boundaries produced by
     the normal grid, giving the diffusion model full context around those seams.
 
-    Tiles that would start before the image boundary are clamped so that they
-    begin at x=0 / y=0 but still cover the same area.  Tiles that extend
-    beyond the right / bottom edge are clamped to the image boundary.
-
     Args:
         image_size: (width, height) of the image in pixels.
         tile_size:  size of each square tile (default 1024).
         overlap:    number of pixels shared between adjacent tiles (default 128).
 
     Returns:
-        Ordered list of TileInfo objects (row-major order).
+        Ordered list of TileInfo objects (row-major order), deduplicated.
+
+    Raises:
+        ValueError: if overlap >= tile_size.
     """
     width, height = image_size
     stride = tile_size - overlap
 
     if stride <= 0:
-        raise ValueError(f"overlap ({overlap}) must be less than tile_size ({tile_size})")
+        raise ValueError(
+            f"overlap ({overlap}) must be less than tile_size ({tile_size})"
+        )
 
     offset = stride // 2
 
-    # Number of tiles needed to cover the image starting from -offset.
-    # We need enough tiles so that the last tile reaches the image edge.
     num_cols = max(1, math.ceil((width + offset - overlap) / stride))
     num_rows = max(1, math.ceil((height + offset - overlap) / stride))
 
     tiles: List[TileInfo] = []
     for row in range(num_rows):
         for col in range(num_cols):
-            # Raw position (may be negative for the first tile)
             raw_x = col * stride - offset
             raw_y = row * stride - offset
 
-            # Clamp start to image boundary
             x = max(0, raw_x)
             y = max(0, raw_y)
 
-            # Clamp so the tile does not start past the last valid position
             x = min(x, max(0, width - tile_size))
             y = min(y, max(0, height - tile_size))
 
             w = min(tile_size, width - x)
             h = min(tile_size, height - y)
 
-            # Skip degenerate tiles (zero area)
             if w <= 0 or h <= 0:
                 continue
 
             tiles.append(TileInfo(x=x, y=y, w=w, h=h, row=row, col=col))
 
-    # Deduplicate by (x, y) position — small images can clamp multiple tiles
-    # to the same origin, producing duplicate work sent to the backend.
+    # Deduplicate by (x, y) position
     seen: set = set()
     result: List[TileInfo] = []
     for tile in tiles:
@@ -423,29 +401,19 @@ def _make_feather_mask(h: int, w: int, feather_size: int) -> np.ndarray:
 
     This produces a gradient that is 1.0 in the centre and fades to 0.0 at
     the edges over ``feather_size`` pixels.
-
-    Args:
-        h:            tile height in pixels.
-        w:            tile width in pixels.
-        feather_size: number of pixels over which the fade occurs.
-
-    Returns:
-        float32 ndarray of shape (h, w) with values in [0, 1].
     """
     ys = np.arange(h, dtype=np.float32)
     xs = np.arange(w, dtype=np.float32)
 
-    dist_top    = ys                         # distance from top edge
-    dist_bottom = (h - 1) - ys              # distance from bottom edge
-    dist_left   = xs                         # distance from left edge
-    dist_right  = (w - 1) - xs              # distance from right edge
+    dist_top    = ys
+    dist_bottom = (h - 1) - ys
+    dist_left   = xs
+    dist_right  = (w - 1) - xs
 
-    # Broadcast to 2-D
-    dist_v = np.minimum(dist_top[:, np.newaxis], dist_bottom[:, np.newaxis])  # (h, 1)
-    dist_h = np.minimum(dist_left[np.newaxis, :], dist_right[np.newaxis, :])  # (1, w)
+    dist_v = np.minimum(dist_top[:, np.newaxis], dist_bottom[:, np.newaxis])
+    dist_h = np.minimum(dist_left[np.newaxis, :], dist_right[np.newaxis, :])
 
-    min_dist = np.minimum(dist_v, dist_h)  # (h, w)
-
+    min_dist = np.minimum(dist_v, dist_h)
     mask = np.clip(min_dist / max(feather_size, 1), 0.0, 1.0)
     return mask
 
@@ -481,25 +449,22 @@ def blend_offset_pass(
         return base_image
 
     img_w, img_h = base_image.size
-    base_arr = np.array(base_image.convert("RGB"), dtype=np.float32)  # (H, W, 3)
+    base_arr = np.array(base_image.convert("RGB"), dtype=np.float32)
 
-    # Accumulate weighted offset tiles
-    blend_acc = np.zeros_like(base_arr)            # weighted sum of offset tile pixels
-    blend_wt  = np.zeros((img_h, img_w), dtype=np.float32)  # total weight per pixel
+    blend_acc = np.zeros_like(base_arr)
+    blend_wt  = np.zeros((img_h, img_w), dtype=np.float32)
 
     for tile_info, tile_img in zip(offset_tiles, offset_results):
         tile_arr = np.array(tile_img.convert("RGB"), dtype=np.float32)
         th, tw = tile_arr.shape[:2]
 
-        # Clamp tile dimensions to what actually fits in the image
         tw = min(tw, img_w - tile_info.x)
         th = min(th, img_h - tile_info.y)
         if tw <= 0 or th <= 0:
             continue
 
         tile_arr = tile_arr[:th, :tw]
-
-        mask = _make_feather_mask(th, tw, feather_size)  # (th, tw)
+        mask = _make_feather_mask(th, tw, feather_size)
 
         y1, y2 = tile_info.y, tile_info.y + th
         x1, x2 = tile_info.x, tile_info.x + tw
@@ -507,13 +472,9 @@ def blend_offset_pass(
         blend_acc[y1:y2, x1:x2] += tile_arr * mask[:, :, np.newaxis]
         blend_wt[y1:y2, x1:x2]  += mask
 
-    # Composite: result = offset_avg * alpha + base * (1 - alpha)
-    # where alpha = blend_wt clamped to [0, 1]
-    alpha = np.clip(blend_wt, 0.0, 1.0)[:, :, np.newaxis]  # (H, W, 1)
-
-    # Where blend_wt > 0, compute the weighted average of offset tiles
+    alpha = np.clip(blend_wt, 0.0, 1.0)[:, :, np.newaxis]
     safe_wt = np.where(blend_wt > 0, blend_wt, 1.0)[:, :, np.newaxis]
-    offset_avg = blend_acc / safe_wt  # (H, W, 3)
+    offset_avg = blend_acc / safe_wt
 
     result_arr = offset_avg * alpha + base_arr * (1.0 - alpha)
     result_arr = np.clip(result_arr, 0, 255).astype(np.uint8)
@@ -540,7 +501,7 @@ def draw_tile_grid(
         processed_indices: tile indices to highlight in green.
 
     Returns:
-        New PIL Image with the grid drawn on top.
+        New PIL Image (RGB) with the grid drawn on top.
     """
     overlay = image.convert("RGBA").copy()
     draw = ImageDraw.Draw(overlay, "RGBA")
@@ -566,13 +527,55 @@ def draw_tile_grid(
 
         draw.rectangle(rect, fill=fill_color, outline=outline_color, width=outline_width)
 
-        # Draw tile index label in the centre
         cx = tile.x + tile.w // 2
         cy = tile.y + tile.h // 2
         label = str(idx)
         draw.text((cx - 8, cy - 8), label, fill=(255, 255, 255, 220))
 
     return overlay.convert("RGB")
+
+
+def generate_mask_blur_preview(
+    tile_image: Image.Image,
+    tile_info: TileInfo,
+    overlap: int,
+    img_width: int,
+    img_height: int,
+) -> Image.Image:
+    """
+    Generate a visualisation of the feathering/blend zones for a tile.
+
+    Areas where the weight map is less than 1.0 (i.e. the feathered overlap
+    edges) are tinted with a semi-transparent orange-red overlay so the user
+    can see which parts of the tile will be blended with neighbouring tiles.
+
+    Args:
+        tile_image: The tile's PIL Image (original or processed).
+        tile_info:  TileInfo describing this tile's position in the full image.
+        overlap:    Overlap in pixels used when the tile grid was calculated.
+        img_width:  Full image width in pixels.
+        img_height: Full image height in pixels.
+
+    Returns:
+        A new PIL Image (RGB) with the feather zones highlighted.
+    """
+    tile_rgb = tile_image.convert("RGB")
+    w, h = tile_rgb.size
+
+    weight = _make_weight_map(h, w, overlap, tile_info, (img_width, img_height))
+
+    tile_arr = np.array(tile_rgb, dtype=np.float32)
+    feather_mask = 1.0 - weight
+
+    tint_r = np.full((h, w), 255.0, dtype=np.float32)
+    tint_g = np.full((h, w), 120.0, dtype=np.float32)
+    tint_b = np.full((h, w), 0.0,   dtype=np.float32)
+    tint = np.stack([tint_r, tint_g, tint_b], axis=-1)
+
+    alpha = (feather_mask * 0.55)[:, :, np.newaxis]
+    result_arr = tile_arr * (1.0 - alpha) + tint * alpha
+    result_arr = np.clip(result_arr, 0, 255).astype(np.uint8)
+    return Image.fromarray(result_arr, mode="RGB")
 
 
 # ---------------------------------------------------------------------------
@@ -599,61 +602,41 @@ def upscale_image(
 
 
 # ---------------------------------------------------------------------------
-# Region overlay visualisation
+# Grid info helper (convenience wrapper)
 # ---------------------------------------------------------------------------
 
-def draw_region_overlay(
-    image: Image.Image,
-    regions: List[dict],
-    selected_index: Optional[int] = None,
-) -> Image.Image:
+def calculate_tile_grid(
+    image_width: int,
+    image_height: int,
+    tile_size: int = 1024,
+    overlap: int = 128,
+) -> dict:
     """
-    Draw region overlays on a copy of the image.
+    Calculate tile grid metadata for an image.
 
     Args:
-    
-    image:           source PIL Image.
-    regions:         list of region dicts with x, y, w, h, padding.
-    selected_index:  index of the currently selected region to highlight.
+        image_width:  image width in pixels.
+        image_height: image height in pixels.
+        tile_size:    size of each square tile (default 1024).
+        overlap:      number of pixels shared between adjacent tiles (default 128).
 
     Returns:
-        New PIL Image with the regions drawn on top.
+        Dict with keys:
+        - ``"tiles"`` (list[TileInfo]): ordered tile list (row-major).
+        - ``"num_tiles"`` (int): total number of tiles.
+        - ``"num_rows"`` (int): number of tile rows.
+        - ``"num_cols"`` (int): number of tile columns.
+        - ``"tile_size"`` (int): tile size used.
+        - ``"overlap"`` (int): overlap used.
     """
-    overlay = image.convert("RGBA").copy()
-    draw = ImageDraw.Draw(overlay, "RGBA")
-
-    for idx, region in enumerate(regions):
-        x = region.get("x", 0)
-        y = region.get("y", 0)
-        w = region.get("w", 0)
-        h = region.get("h", 0)
-        padding = region.get("padding", 0)
-
-        # Draw padding region (lighter)
-        if padding > 0:
-            pad_rect = [
-                x - padding,
-                y - padding,
-                x + w + padding,
-                y + h + padding,
-            ]
-            draw.rectangle(pad_rect, fill=(255, 200, 0, 30), outline=(255, 200, 0, 150), width=2)
-
-        # Draw main region rectangle
-        rect = [x, y, x + w, y + h]
-        if idx == selected_index:
-            fill_color = (0, 100, 255, 60)
-            outline_color = (0, 100, 255, 220)
-            outline_width = 3
-        else:
-            fill_color = (255, 100, 0, 50)
-            outline_color = (255, 100, 0, 200)
-            outline_width = 2
-
-        draw.rectangle(rect, fill=fill_color, outline=outline_color, width=outline_width)
-
-        # Draw region index label in the top-left corner
-        label = f"#{idx}"
-        draw.text((x + 5, y + 5), label, fill=(255, 255, 255, 220))
-
-    return overlay.convert("RGB")
+    tiles = calculate_tiles((image_width, image_height), tile_size=tile_size, overlap=overlap)
+    num_rows = max(t.row for t in tiles) + 1 if tiles else 0
+    num_cols = max(t.col for t in tiles) + 1 if tiles else 0
+    return {
+        "tiles": tiles,
+        "num_tiles": len(tiles),
+        "num_rows": num_rows,
+        "num_cols": num_cols,
+        "tile_size": tile_size,
+        "overlap": overlap,
+    }

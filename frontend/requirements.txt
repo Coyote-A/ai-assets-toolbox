@@ -1,5 +1,0 @@
-gradio>=4.0
-Pillow
-numpy
-requests
-python-dotenv
