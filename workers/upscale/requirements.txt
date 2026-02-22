@@ -8,3 +8,4 @@ safetensors>=0.4.0
 Pillow>=10.0.0
 peft>=0.12.0
 controlnet-aux
+compel>=2.0.2

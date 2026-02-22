@@ -4,7 +4,8 @@ SDXL img2img pipeline wrapper.
 Supports:
 - Plain img2img via ``StableDiffusionXLImg2ImgPipeline``
 - ControlNet tile conditioning via ``StableDiffusionXLControlNetImg2ImgPipeline``
-- LoRA adapters via ``pipe.load_lora_weights()`` / ``pipe.fuse_lora()``
+- Multi-LoRA adapters via ``pipe.load_lora_weights()`` / ``pipe.set_adapters()``
+- Long-prompt support via ``compel`` (bypasses CLIP's 77-token limit)
 
 Loading strategy
 ----------------
@@ -29,6 +30,73 @@ SDXL_TILE_CONTROLNET_ID = "xinsir/controlnet-tile-sdxl-1.0"
 def _is_single_file(model_path: str) -> bool:
     """Return ``True`` when *model_path* points to a single ``.safetensors`` file."""
     return model_path.endswith(".safetensors") and os.path.isfile(model_path)
+
+
+def _build_compel(pipe: any) -> Optional[any]:
+    """Build a Compel instance for long-prompt encoding with SDXL dual encoders.
+
+    Returns ``None`` if compel is not installed or the pipeline lacks the
+    required tokenizer/encoder attributes.
+    """
+    try:
+        from compel import Compel, ReturnedEmbeddingsType
+
+        if not (
+            hasattr(pipe, "tokenizer")
+            and hasattr(pipe, "tokenizer_2")
+            and hasattr(pipe, "text_encoder")
+            and hasattr(pipe, "text_encoder_2")
+        ):
+            logger.warning(
+                "Pipeline is missing tokenizer/text_encoder attributes — compel disabled"
+            )
+            return None
+
+        compel = Compel(
+            tokenizer=[pipe.tokenizer, pipe.tokenizer_2],
+            text_encoder=[pipe.text_encoder, pipe.text_encoder_2],
+            returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
+            requires_pooled=[False, True],
+        )
+        logger.info("Compel long-prompt encoder initialised")
+        return compel
+    except ImportError:
+        logger.warning(
+            "compel is not installed — prompts will be truncated at 77 tokens. "
+            "Add 'compel>=2.0.2' to requirements.txt to enable long-prompt support."
+        )
+        return None
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("Failed to initialise compel: %s — falling back to raw prompts", exc)
+        return None
+
+
+def _encode_prompt_with_compel(
+    compel: any,
+    prompt: str,
+    negative_prompt: str,
+) -> tuple[Optional[any], Optional[any], Optional[any], Optional[any]]:
+    """Encode *prompt* and *negative_prompt* using compel.
+
+    Returns
+    -------
+    tuple of (conditioning, pooled, neg_conditioning, neg_pooled)
+        All four tensors ready to pass to the pipeline as
+        ``prompt_embeds``, ``pooled_prompt_embeds``,
+        ``negative_prompt_embeds``, ``negative_pooled_prompt_embeds``.
+        Returns ``(None, None, None, None)`` on failure.
+    """
+    try:
+        conditioning, pooled = compel(prompt)
+        neg_conditioning, neg_pooled = compel(negative_prompt)
+        # Pad to equal length so they can be batched together
+        [conditioning, neg_conditioning] = compel.pad_conditioning_tensors_to_same_length(
+            [conditioning, neg_conditioning]
+        )
+        return conditioning, pooled, neg_conditioning, neg_pooled
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("compel encoding failed: %s — falling back to raw prompt strings", exc)
+        return None, None, None, None
 
 
 class SDXLPipeline:
@@ -56,6 +124,7 @@ class SDXLPipeline:
         self._pipe = None
         self._controlnet = None
         self._active_lora: Optional[str] = None
+        self._compel = None
 
         self._build_pipeline()
 
@@ -68,6 +137,9 @@ class SDXLPipeline:
             self._build_controlnet_pipeline()
         else:
             self._build_plain_pipeline()
+
+        # Initialise compel after the pipeline is ready
+        self._compel = _build_compel(self._pipe)
 
     def _build_plain_pipeline(self) -> None:
         from diffusers import DPMSolverMultistepScheduler, StableDiffusionXLImg2ImgPipeline
@@ -237,8 +309,6 @@ class SDXLPipeline:
             generator = torch.Generator(device="cuda").manual_seed(seed)
 
         kwargs: dict = {
-            "prompt": prompt,
-            "negative_prompt": negative_prompt,
             "image": image,
             "strength": strength,
             "num_inference_steps": steps,
@@ -253,6 +323,28 @@ class SDXLPipeline:
         if target_height is not None:
             kwargs["height"] = target_height
 
+        # ------------------------------------------------------------------
+        # Prompt encoding — use compel for long-prompt support when available
+        # ------------------------------------------------------------------
+        use_compel = self._compel is not None
+        if use_compel:
+            conditioning, pooled, neg_conditioning, neg_pooled = _encode_prompt_with_compel(
+                self._compel, prompt, negative_prompt
+            )
+            if conditioning is not None:
+                kwargs["prompt_embeds"] = conditioning
+                kwargs["pooled_prompt_embeds"] = pooled
+                kwargs["negative_prompt_embeds"] = neg_conditioning
+                kwargs["negative_pooled_prompt_embeds"] = neg_pooled
+                logger.debug("Using compel prompt embeddings (long-prompt support active)")
+            else:
+                # compel failed — fall back to raw strings
+                use_compel = False
+
+        if not use_compel:
+            kwargs["prompt"] = prompt
+            kwargs["negative_prompt"] = negative_prompt
+
         if self._controlnet is not None:
             # Use the input tile as the control image if none provided
             ctrl_img = controlnet_image if controlnet_image is not None else image
@@ -263,7 +355,8 @@ class SDXLPipeline:
             kwargs["ip_adapter_image"] = ip_adapter_image
 
         logger.info(
-            "SDXL generate: steps=%d strength=%.2f cfg=%.1f seed=%s controlnet=%s ip_adapter=%s target_size=%s",
+            "SDXL generate: steps=%d strength=%.2f cfg=%.1f seed=%s controlnet=%s ip_adapter=%s "
+            "target_size=%s compel=%s prompt_len=%d",
             steps,
             strength,
             cfg_scale,
@@ -271,6 +364,8 @@ class SDXLPipeline:
             self._controlnet is not None,
             ip_adapter_image is not None,
             f"{target_width}x{target_height}" if target_width and target_height else "from_image",
+            use_compel,
+            len(prompt),
         )
 
         result = self._pipe(**kwargs)

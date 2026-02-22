@@ -67,8 +67,20 @@ from typing import Any, Optional
 
 from model_manager import ModelManager
 from utils.image_utils import b64_to_pil, pil_to_b64
+from pipelines.sdxl_pipeline import _build_compel, _encode_prompt_with_compel
 
 logger = logging.getLogger(__name__)
+
+# Module-level compel instance — built lazily on first use and reused across calls.
+_compel_instance = None
+
+
+def _get_compel(pipe: Any) -> Any:
+    """Return (or lazily build) the module-level Compel instance for *pipe*."""
+    global _compel_instance  # noqa: PLW0603
+    if _compel_instance is None:
+        _compel_instance = _build_compel(pipe)
+    return _compel_instance
 
 
 def handle_upscale_regions(job_input: dict[str, Any]) -> dict[str, Any]:
@@ -158,14 +170,11 @@ def handle_upscale_regions(job_input: dict[str, Any]) -> dict[str, Any]:
     manager = ModelManager.get_instance()
     manager.load_diffusion_model(base_model)
 
-    # Apply LoRAs — all provided LoRAs are applied in order
+    # Apply all LoRAs simultaneously using multi-adapter support
+    applied_lora_names: list[str] = []
     if loras:
-        for lora_entry in loras:
-            lora_name_val: str = lora_entry.get("name", "")
-            lora_weight_val: float = float(lora_entry.get("weight", 1.0))
-            if lora_name_val:
-                logger.info("Applying LoRA '%s' with weight %.2f", lora_name_val, lora_weight_val)
-                manager.apply_lora(lora_name_val, weight=lora_weight_val)
+        logger.info("Applying %d LoRA(s) simultaneously: %s", len(loras), [l.get("name") for l in loras])
+        applied_lora_names = manager.apply_loras(loras)
 
     # ------------------------------------------------------------------
     # IP-Adapter: load or unload as needed
@@ -290,6 +299,10 @@ def handle_upscale_regions(job_input: dict[str, Any]) -> dict[str, Any]:
         })
         logger.info("Region '%s' processed successfully", region_id)
 
+    # Clean up LoRAs after all regions are processed
+    if applied_lora_names:
+        manager.remove_loras(applied_lora_names)
+
     return {"regions": results}
 
 
@@ -326,14 +339,33 @@ def _run_sdxl(
 
     generator = torch.Generator(device="cuda").manual_seed(seed)
     kwargs: dict[str, Any] = {
-        "prompt": prompt,
-        "negative_prompt": negative_prompt,
         "image": image,
         "strength": strength,
         "num_inference_steps": steps,
         "guidance_scale": cfg_scale,
         "generator": generator,
     }
+
+    # ------------------------------------------------------------------
+    # Prompt encoding — use compel for long-prompt support when available
+    # ------------------------------------------------------------------
+    compel = _get_compel(pipe)
+    use_compel = compel is not None
+    if use_compel:
+        conditioning, pooled, neg_conditioning, neg_pooled = _encode_prompt_with_compel(
+            compel, prompt, negative_prompt
+        )
+        if conditioning is not None:
+            kwargs["prompt_embeds"] = conditioning
+            kwargs["pooled_prompt_embeds"] = pooled
+            kwargs["negative_prompt_embeds"] = neg_conditioning
+            kwargs["negative_pooled_prompt_embeds"] = neg_pooled
+        else:
+            use_compel = False
+
+    if not use_compel:
+        kwargs["prompt"] = prompt
+        kwargs["negative_prompt"] = negative_prompt
 
     # Pass explicit width/height to the pipeline when provided.
     if target_width is not None:

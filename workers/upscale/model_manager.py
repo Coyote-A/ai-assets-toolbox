@@ -22,6 +22,81 @@ import torch
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Module-level LoRA helpers (used by pipeline code directly)
+# ---------------------------------------------------------------------------
+
+def apply_loras(pipe: Any, loras: list[dict]) -> list[str]:
+    """Apply multiple LoRAs simultaneously using diffusers multi-adapter support.
+
+    Parameters
+    ----------
+    pipe:
+        The loaded diffusers pipeline.
+    loras:
+        List of dicts with keys ``"name"`` (str) and ``"weight"`` (float).
+
+    Returns
+    -------
+    list[str]
+        The adapter names that were successfully loaded (for later cleanup via
+        :func:`remove_loras`).
+    """
+    adapter_names: list[str] = []
+    adapter_weights: list[float] = []
+
+    for lora in loras:
+        name: str = lora.get("name", "")
+        weight: float = float(lora.get("weight", 1.0))
+        if not name:
+            continue
+
+        # Resolve path — check HARDCODED_LORAS first, then raw filename
+        if name in HARDCODED_LORAS:
+            info = HARDCODED_LORAS[name]
+            lora_path = os.path.join(LORAS_DIR, info["filename"])
+        else:
+            lora_path = os.path.join(LORAS_DIR, name)
+            if not os.path.isfile(lora_path):
+                lora_path = os.path.join(LORAS_DIR, f"{name}.safetensors")
+
+        if not os.path.isfile(lora_path):
+            logger.warning("Skipping LoRA '%s' — file not found at '%s'", name, lora_path)
+            continue
+
+        logger.info("Loading LoRA '%s' (weight=%.2f) from '%s'", name, weight, lora_path)
+        try:
+            pipe.load_lora_weights(lora_path, adapter_name=name)
+            adapter_names.append(name)
+            adapter_weights.append(weight)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("Failed to load LoRA '%s': %s", name, exc)
+
+    if adapter_names:
+        logger.info("Activating adapters: %s with weights %s", adapter_names, adapter_weights)
+        pipe.set_adapters(adapter_names, adapter_weights)
+
+    return adapter_names
+
+
+def remove_loras(pipe: Any, adapter_names: list[str]) -> None:
+    """Remove all applied LoRAs from the pipeline.
+
+    Parameters
+    ----------
+    pipe:
+        The loaded diffusers pipeline.
+    adapter_names:
+        The list returned by :func:`apply_loras`.
+    """
+    if not adapter_names:
+        return
+    logger.info("Unloading LoRA adapters: %s", adapter_names)
+    try:
+        pipe.unload_lora_weights()
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("Could not unload LoRA weights: %s", exc)
+
+# ---------------------------------------------------------------------------
 # Flat model directory paths (baked into the Docker image at build time)
 # ---------------------------------------------------------------------------
 MODELS_DIR = os.environ.get("MODELS_DIR", "/app/models")
@@ -125,12 +200,12 @@ def ensure_loras_downloaded() -> None:
                         fh.write(chunk)
             logger.info(
                 "LoRA '%s' downloaded successfully (%d bytes)",
-                short_name, os.path.getsize(dest_path),
+                ui_name, os.path.getsize(dest_path),
             )
         except Exception as exc:  # pylint: disable=broad-except
-            logger.warning(
+            logger.error(
                 "Failed to download LoRA '%s' (version %s): %s",
-                short_name, version_id, exc,
+                ui_name, info["version_id"], exc,
             )
             # Remove partial file if it exists
             if os.path.isfile(dest_path):
@@ -174,8 +249,8 @@ class ModelManager:
         self._controlnet: Any = None
         self._controlnet_name: Optional[str] = None
 
-        # Track which LoRA is currently fused
-        self._active_lora: Optional[str] = None
+        # Track which LoRAs are currently loaded (adapter names)
+        self._active_loras: list[str] = []
 
         # IP-Adapter state
         self._ip_adapter_loaded: bool = False
@@ -210,7 +285,7 @@ class ModelManager:
         self._diffusion_pipe = self._load_sdxl(model_path)
 
         self._diffusion_model_name = model_name
-        self._active_lora = None
+        self._active_loras = []
         logger.info("Diffusion model '%s' loaded successfully", model_name)
         return self._diffusion_pipe
 
@@ -240,44 +315,44 @@ class ModelManager:
         logger.info("ControlNet '%s' loaded successfully", model_name)
         return self._controlnet
 
-    def apply_lora(self, lora_name: str, weight: float = 1.0) -> None:
-        """
-        Load and fuse a LoRA adapter into the currently loaded diffusion pipeline.
+    def apply_loras(self, loras: list[dict]) -> list[str]:
+        """Apply multiple LoRAs simultaneously using diffusers multi-adapter support.
 
-        ``lora_name`` should be the filename (without extension) of a
-        ``.safetensors`` file located in ``LORAS_DIR``.
+        Parameters
+        ----------
+        loras:
+            List of dicts with keys ``"name"`` (str) and ``"weight"`` (float).
+
+        Returns
+        -------
+        list[str]
+            The adapter names that were successfully loaded (pass to
+            :meth:`remove_loras` for cleanup after generation).
         """
         if self._diffusion_pipe is None:
-            raise RuntimeError("No diffusion model loaded; cannot apply LoRA")
+            raise RuntimeError("No diffusion model loaded; cannot apply LoRAs")
 
-        if self._active_lora == lora_name:
-            logger.info("LoRA '%s' already applied — skipping", lora_name)
+        # Remove any previously loaded LoRAs first
+        if self._active_loras:
+            self.remove_loras()
+
+        self._active_loras = apply_loras(self._diffusion_pipe, loras)
+        return self._active_loras
+
+    def remove_loras(self, adapter_names: Optional[list[str]] = None) -> None:
+        """Remove all applied LoRAs from the pipeline.
+
+        Parameters
+        ----------
+        adapter_names:
+            The list returned by :meth:`apply_loras`.  When ``None``, removes
+            whatever is currently tracked in ``_active_loras``.
+        """
+        if self._diffusion_pipe is None:
             return
-
-        # Unfuse any previously fused LoRA before applying a new one
-        if self._active_lora is not None:
-            logger.info("Unfusing previous LoRA '%s'", self._active_lora)
-            try:
-                self._diffusion_pipe.unfuse_lora()
-                self._diffusion_pipe.unload_lora_weights()
-            except Exception as exc:  # pylint: disable=broad-except
-                logger.warning("Could not unfuse previous LoRA: %s", exc)
-
-        try:
-            lora_path = self._resolve_lora_path(lora_name)
-        except FileNotFoundError as exc:
-            logger.warning(
-                "Skipping LoRA '%s' — file not found (upscale will continue without it): %s",
-                lora_name, exc,
-            )
-            return
-
-        logger.info("Applying LoRA '%s' (weight=%.2f) from '%s'", lora_name, weight, lora_path)
-
-        self._diffusion_pipe.load_lora_weights(lora_path)
-        self._diffusion_pipe.fuse_lora(lora_scale=weight)
-        self._active_lora = lora_name
-        logger.info("LoRA '%s' applied and fused", lora_name)
+        names = adapter_names if adapter_names is not None else self._active_loras
+        remove_loras(self._diffusion_pipe, names)
+        self._active_loras = []
 
     def unload_current(self) -> None:
         """
@@ -288,7 +363,7 @@ class ModelManager:
             del self._diffusion_pipe
             self._diffusion_pipe = None
             self._diffusion_model_name = None
-            self._active_lora = None
+            self._active_loras = []
             self._ip_adapter_loaded = False
 
         if self._controlnet is not None:
@@ -308,7 +383,7 @@ class ModelManager:
             return {
                 "type": "diffusion",
                 "name": self._diffusion_model_name,
-                "lora": self._active_lora,
+                "loras": self._active_loras,
                 "controlnet": self._controlnet_name,
                 "ip_adapter_loaded": self._ip_adapter_loaded,
             }
