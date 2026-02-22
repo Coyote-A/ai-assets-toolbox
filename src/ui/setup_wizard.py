@@ -112,24 +112,26 @@ def create_setup_wizard() -> tuple:
     * **Step 3** — "Ready" screen with a *Start* button.
 
     The caller is responsible for wiring the *Start* button and the
-    token-restore handler to ``demo.load``.  All necessary references are
-    returned in the tuple.
+    combined page-load handler to ``demo.load``.  All necessary references
+    are returned in the tuple.
 
     Returns:
-        A 6-tuple ``(wizard_group, check_fn, start_btn,
-        restore_tokens_fn, restore_inputs, restore_outputs)`` where:
+        A 6-tuple ``(wizard_group, start_btn,
+        on_load_fn, on_load_inputs, on_load_outputs, step1_group)`` where:
 
         * *wizard_group* — outer ``gr.Group`` wrapping all three steps.
-        * *check_fn* — callable returning ``True`` when all models are
-          already downloaded.
         * *start_btn* — ``gr.Button`` on step 3; wire its ``.click`` with
           ``outputs=[wizard_group, tool_group]``.
-        * *restore_tokens_fn* — function to pass to ``demo.load`` to
-          pre-fill token textboxes from BrowserState.
-        * *restore_inputs* — list of ``gr.BrowserState`` components to
+        * *on_load_fn* — combined page-load function; receives BrowserState
+          tokens, checks model status, and returns visibility updates for
+          the wizard, tool, step1, step2 groups plus the token textboxes.
+          Pass to ``demo.load`` with *on_load_inputs* / *on_load_outputs*.
+        * *on_load_inputs* — list of ``gr.BrowserState`` components to
           pass as ``inputs`` to ``demo.load``.
-        * *restore_outputs* — list of ``gr.Textbox`` components to pass
-          as ``outputs`` to ``demo.load``.
+        * *on_load_outputs* — list of components to pass as ``outputs`` to
+          ``demo.load`` (textboxes + group visibility).
+        * *step1_group* — the Step-1 ``gr.Group``; exposed so the caller
+          can include it in ``on_load_outputs``.
     """
 
     # ------------------------------------------------------------------
@@ -213,33 +215,83 @@ def create_setup_wizard() -> tuple:
             start_btn = gr.Button("🚀 Start", variant="primary", size="lg")
 
     # ------------------------------------------------------------------
-    # Helper: check if all models are already downloaded
+    # Combined page-load handler.
+    #
+    # Receives BrowserState tokens (available only after page load) and
+    # decides which step/group to show:
+    #
+    #   • All models downloaded          → hide wizard, show tool
+    #   • Models missing, tokens saved   → show wizard at Step 2
+    #   • Models missing, no tokens      → show wizard at Step 1
+    #
+    # Returns a 6-tuple that maps to on_load_outputs (see below).
     # ------------------------------------------------------------------
-    def check_models_downloaded() -> bool:
-        """Return True if every model is already present on the volume."""
+    def _on_load(hf_tok: str, civitai_tok: str):
+        """Combined page-load handler: restore tokens + route to correct step."""
+        hf_tok = hf_tok or ""
+        civitai_tok = civitai_tok or ""
+
+        # Check whether all models are already present.
+        all_ready = False
         try:
             from src.services.download import DownloadService  # noqa: PLC0415
 
             status = DownloadService().check_status.remote()
-            return all(v["downloaded"] for v in status.values())
+            all_ready = all(v["downloaded"] for v in status.values())
         except Exception:  # noqa: BLE001
-            logger.warning("Could not check model status — assuming not ready.")
-            return False
+            logger.warning("Could not check model status on page load — showing wizard.")
 
-    # ------------------------------------------------------------------
-    # Event: restore tokens from BrowserState on page load.
-    # BrowserState values are available after the page loads; we wire
-    # this via the parent's demo.load by returning the necessary
-    # inputs/outputs so the caller can register the handler.
-    # ------------------------------------------------------------------
-    def _restore_tokens(hf_tok: str, civitai_tok: str):
-        """Populate the token textboxes from BrowserState on page load."""
-        return hf_tok or "", civitai_tok or ""
+        if all_ready:
+            # Skip wizard entirely — show the main tool.
+            return (
+                hf_tok,                      # hf_token_input
+                civitai_tok,                 # civitai_token_input
+                gr.Group(visible=False),     # wizard_group
+                gr.Group(visible=True),      # tool_group  (caller provides at index 3)
+                gr.Group(visible=True),      # step1_group (doesn't matter, wizard hidden)
+                gr.Group(visible=False),     # step2_group
+            )
 
-    # Expose the restore handler and its I/O so the parent can wire it
-    # to demo.load (BrowserState values are only available after load).
-    restore_token_inputs = [hf_token_state, civitai_token_state]
-    restore_token_outputs = [hf_token_input, civitai_token_input]
+        has_tokens = bool(hf_tok or civitai_tok)
+        if has_tokens:
+            # Models missing but tokens already saved → skip Step 1, go to Step 2.
+            return (
+                hf_tok,
+                civitai_tok,
+                gr.Group(visible=True),      # wizard_group
+                gr.Group(visible=False),     # tool_group
+                gr.Group(visible=False),     # step1_group  ← hidden
+                gr.Group(visible=True),      # step2_group  ← shown
+            )
+
+        # No tokens yet → show Step 1 as normal.
+        return (
+            hf_tok,
+            civitai_tok,
+            gr.Group(visible=True),          # wizard_group
+            gr.Group(visible=False),         # tool_group
+            gr.Group(visible=True),          # step1_group
+            gr.Group(visible=False),         # step2_group
+        )
+
+    # Inputs: the two BrowserState components.
+    on_load_inputs = [hf_token_state, civitai_token_state]
+    # Outputs (wizard-side): textboxes + wizard_group + step1_group + step2_group.
+    # The caller must insert tool_group at index 3 when wiring demo.load:
+    #
+    #   full_outputs = (
+    #       on_load_outputs[:3]   # hf_input, civitai_input, wizard_group
+    #       + [tool_group]        # injected by caller
+    #       + on_load_outputs[3:] # step1_group, step2_group
+    #   )
+    on_load_outputs_wizard = [
+        hf_token_input,       # 0
+        civitai_token_input,  # 1
+        wizard_group,         # 2
+        # tool_group at index 3 — injected by caller
+        step1_group,          # 4 (after caller inserts tool_group)
+        step2_group,          # 5
+    ]
 
     # ------------------------------------------------------------------
     # Event: Step 1 → Step 2 (save tokens, advance)
@@ -341,21 +393,22 @@ def create_setup_wizard() -> tuple:
     # The caller receives start_btn and wires it with the appropriate
     # outputs (wizard_group + tool_group) after both groups exist.
     #
-    # Similarly, the caller must register the token-restore handler on
-    # demo.load using the returned restore_* values:
+    # The caller must register the combined page-load handler on
+    # demo.load, inserting tool_group into the outputs list at index 3:
     #
-    #   demo.load(
-    #       fn=restore_tokens_fn,
-    #       inputs=restore_token_inputs,
-    #       outputs=restore_token_outputs,
+    #   full_outputs = (
+    #       on_load_outputs[:3]          # hf_input, civitai_input, wizard_group
+    #       + [tool_group]               # injected by caller
+    #       + on_load_outputs[3:]        # step1_group, step2_group
     #   )
+    #   demo.load(fn=on_load_fn, inputs=on_load_inputs, outputs=full_outputs)
     # ------------------------------------------------------------------
 
     return (
         wizard_group,
-        check_models_downloaded,
         start_btn,
-        _restore_tokens,
-        restore_token_inputs,
-        restore_token_outputs,
+        _on_load,
+        on_load_inputs,
+        on_load_outputs_wizard,
+        step1_group,
     )

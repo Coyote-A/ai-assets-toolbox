@@ -791,16 +791,16 @@ def create_gradio_app() -> gr.Blocks:
         # ------------------------------------------------------------------
         # Setup wizard — shown on first visit; hidden once models are ready.
         # create_setup_wizard() returns a 6-tuple; we unpack all parts so we
-        # can wire the Start button and the BrowserState token restore here,
+        # can wire the Start button and the combined page-load handler here,
         # where both wizard_group and tool_group are in scope.
         # ------------------------------------------------------------------
         (
             wizard_group,
-            _check_models_downloaded,
             start_btn,
-            restore_tokens_fn,
-            restore_token_inputs,
-            restore_token_outputs,
+            on_load_fn,
+            on_load_inputs,
+            on_load_outputs_wizard,
+            _step1_group,
         ) = create_setup_wizard()
 
         # Wire the Start button: hide wizard, show tool
@@ -814,47 +814,30 @@ def create_gradio_app() -> gr.Blocks:
         )
 
         # ------------------------------------------------------------------
-        # Page-load handler — two responsibilities:
+        # Single combined page-load handler — three responsibilities:
         #   1. Restore saved API tokens from BrowserState into the textboxes.
         #   2. Skip the wizard entirely if all models are already downloaded.
+        #   3. Skip Step 1 and go directly to Step 2 if tokens are saved but
+        #      models are not yet downloaded.
         #
-        # Gradio 6.0 allows multiple demo.load() registrations; each fires
-        # independently on page load.
+        # on_load_outputs_wizard contains:
+        #   [0] hf_token_input textbox
+        #   [1] civitai_token_input textbox
+        #   [2] wizard_group
+        #   [3] ← tool_group injected here by the caller (us)
+        #   [4] step1_group
+        #   [5] step2_group
         # ------------------------------------------------------------------
-
-        # 1. Restore tokens
-        demo.load(
-            fn=restore_tokens_fn,
-            inputs=restore_token_inputs,
-            outputs=restore_token_outputs,
+        full_on_load_outputs = (
+            on_load_outputs_wizard[:3]   # hf_input, civitai_input, wizard_group
+            + [tool_group]               # injected here — index 3
+            + on_load_outputs_wizard[3:] # step1_group, step2_group
         )
 
-        # 2. Check model status and show/hide wizard accordingly
-        def _on_page_load():
-            """
-            Called on every page load.  If all models are already present on
-            the volume, skip straight to the main tool UI.
-            """
-            try:
-                from src.services.download import DownloadService  # noqa: PLC0415
-
-                status = DownloadService().check_status.remote()
-                all_ready = all(v["downloaded"] for v in status.values())
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "Could not reach DownloadService on page load — showing wizard."
-                )
-                all_ready = False
-
-            if all_ready:
-                # Models present: hide wizard, show tool
-                return gr.Group(visible=False), gr.Group(visible=True)
-            # Models missing: show wizard, hide tool
-            return gr.Group(visible=True), gr.Group(visible=False)
-
         demo.load(
-            fn=_on_page_load,
-            outputs=[wizard_group, tool_group],
+            fn=on_load_fn,
+            inputs=on_load_inputs,
+            outputs=full_on_load_outputs,
         )
 
         # 3. Run metadata migration (seeds .metadata.json from legacy hardcoded
