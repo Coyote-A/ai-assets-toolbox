@@ -628,7 +628,7 @@ def _upscale_tiles_batch(
         return tiles_state, None, "⚠️ No tiles to process."
 
     # Automatic trigger word injection for active LoRAs
-    from frontend.civitai_models import get_model_details_by_name
+    from civitai_models import get_model_details_by_name
     injected_triggers = []
     
     for lora, state in zip(HARDCODED_LORAS, lora_states):

@@ -83,7 +83,7 @@ class QwenPipeline:
         self,
         image: Image.Image,
         system_prompt: Optional[str] = None,
-        max_new_tokens: int = 300,
+        max_new_tokens: int = 100,
     ) -> str:
         """
         Generate a caption for the given image.
@@ -95,7 +95,8 @@ class QwenPipeline:
         system_prompt:
             Custom system prompt.  Defaults to ``DEFAULT_SYSTEM_PROMPT``.
         max_new_tokens:
-            Maximum number of tokens to generate.
+            Maximum number of tokens to generate.  Kept low (100) so the
+            model outputs ~10-15 keywords without padding or repetition.
 
         Returns
         -------
@@ -138,6 +139,8 @@ class QwenPipeline:
             output_ids = self._model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
+                do_sample=False,
+                repetition_penalty=1.5,
             )
 
         # Decode only the newly generated tokens (skip the input prompt)
