@@ -275,6 +275,45 @@ class DownloadService:
         return self.check_status.local()
 
     # ------------------------------------------------------------------
+    # Volume cleanup
+    # ------------------------------------------------------------------
+
+    @modal.method()
+    def reset_model(self, key: str) -> dict:
+        """Delete a model from the volume and remove it from the manifest.
+        Used when a model needs to be re-downloaded (e.g., wrong version).
+        """
+        entry = get_model(key)
+        model_dir = os.path.join(MODELS_MOUNT_PATH, entry.local_dir)
+
+        # Delete the model directory
+        if os.path.exists(model_dir):
+            shutil.rmtree(model_dir)
+            logger.info("Deleted model directory: %s", model_dir)
+
+        # Remove from manifest
+        manifest = read_manifest(MODELS_MOUNT_PATH)
+        if key in manifest:
+            del manifest[key]
+            write_manifest(manifest, MODELS_MOUNT_PATH)
+            logger.info("Removed '%s' from manifest", key)
+
+        # Remove from progress
+        progress_path = os.path.join(MODELS_MOUNT_PATH, PROGRESS_FILE)
+        if os.path.exists(progress_path):
+            with open(progress_path) as f:
+                progress = json.load(f)
+            if key in progress:
+                del progress[key]
+                with open(progress_path, "w") as f:
+                    json.dump(progress, f, indent=2)
+
+        from src.app_config import models_volume
+        models_volume.commit()
+
+        return self.check_status()
+
+    # ------------------------------------------------------------------
     # LoRA download (CivitAI)
     # ------------------------------------------------------------------
 
