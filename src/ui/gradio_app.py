@@ -840,12 +840,26 @@ def create_gradio_app() -> gr.Blocks:
         )
 
         # ------------------------------------------------------------------
+        # No BrowserState needed for tokens - they're stored server-side
+        # in a JSON file on the persistent lora_volume.
+        # ------------------------------------------------------------------
+        # No BrowserState needed for tokens - they're stored server-side
+        # in a JSON file on the persistent lora_volume.
+        # ------------------------------------------------------------------
+
+        # ------------------------------------------------------------------
         # Main tool UI — initially hidden until setup is complete
         # ------------------------------------------------------------------
         with gr.Group(visible=False) as tool_group:
             with gr.Tabs():
                 _build_upscale_tab()
                 _build_model_manager_tab()
+                (
+                    settings_hf_token_input,
+                    settings_civitai_token_input,
+                    settings_hf_status_html,
+                    settings_civitai_status_html,
+                ) = _build_settings_tab()
 
         # ------------------------------------------------------------------
         # Setup wizard — shown on first visit; hidden once models are ready.
@@ -874,27 +888,32 @@ def create_gradio_app() -> gr.Blocks:
 
         # ------------------------------------------------------------------
         # Single combined page-load handler — three responsibilities:
-        #   1. Restore saved API tokens from BrowserState into the textboxes.
+        #   1. Restore saved API tokens from server-side storage into the textboxes.
         #   2. Skip the wizard entirely if all models are already downloaded.
         #   3. Skip Step 1 and go directly to Step 2 if tokens are saved but
         #      models are not yet downloaded.
         #
         # on_load_outputs_wizard contains:
-        #   [0] hf_token_input textbox
-        #   [1] civitai_token_input textbox
-        #   [2] hf_status_html
-        #   [3] civitai_status_html
+        #   [0] hf_token_input textbox (wizard)
+        #   [1] civitai_token_input textbox (wizard)
+        #   [2] hf_status_html (wizard)
+        #   [3] civitai_status_html (wizard)
         #   [4] step1_save_status
         #   [5] wizard_group
         #   [6] ← tool_group injected here by the caller (us)
         #   [7] step1_group
         #   [8] step2_group
+        #
+        # We also need to update the Settings tab textboxes, so we add them
+        # after the wizard outputs.
         # ------------------------------------------------------------------
         full_on_load_outputs = (
             on_load_outputs_wizard[:6]   # hf_input, civitai_input, hf_status,
                                          # civitai_status, save_status, wizard_group
             + [tool_group]               # injected here — index 6
             + on_load_outputs_wizard[6:] # step1_group, step2_group
+            + [settings_hf_token_input, settings_civitai_token_input,
+               settings_hf_status_html, settings_civitai_status_html]  # settings tab
         )
 
         demo.load(
@@ -1892,6 +1911,121 @@ def _build_preview_html(info: Dict) -> str:
     )
 
 
+def _token_status_html(saved: bool) -> str:
+    """Return a small inline HTML badge indicating whether a token is saved."""
+    if saved:
+        return (
+            '<span style="color:#4CAF50;font-size:0.9em;font-weight:600;">'
+            "✓ Saved"
+            "</span>"
+        )
+    return (
+        '<span style="color:#9E9E9E;font-size:0.9em;">'
+        "❌ Not set"
+        "</span>"
+    )
+
+
+def _build_settings_tab() -> Tuple[gr.Textbox, gr.Textbox, gr.HTML, gr.HTML]:
+    """
+    Render the Settings tab with API token inputs.
+
+    Returns:
+        A tuple of (hf_token_input, civitai_token_input, hf_status_html, civitai_status_html)
+        for wiring in create_gradio_app().
+    """
+    with gr.Tab("⚙️ Settings"):
+        gr.Markdown("## ⚙️ Settings")
+        gr.Markdown(
+            "Configure your API tokens here. These are stored **securely on the server** "
+            "and persist across server restarts."
+        )
+
+        with gr.Group():
+            gr.Markdown("### API Tokens")
+
+            with gr.Row():
+                hf_token_input = gr.Textbox(
+                    label="HuggingFace Token",
+                    type="password",
+                    placeholder="hf_… (optional — required for gated models)",
+                    scale=4,
+                )
+                hf_status_html = gr.HTML(
+                    value=_token_status_html(False),
+                    label="",
+                )
+
+            with gr.Row():
+                civitai_token_input = gr.Textbox(
+                    label="CivitAI API Token",
+                    type="password",
+                    placeholder="Paste your CivitAI token here… (optional — required for NSFW/early-access models)",
+                    scale=4,
+                )
+                civitai_status_html = gr.HTML(
+                    value=_token_status_html(False),
+                    label="",
+                )
+
+            save_feedback = gr.HTML(value="", label="")
+
+            # ------------------------------------------------------------------
+            # Save tokens to server-side storage when user changes them
+            # ------------------------------------------------------------------
+            def _save_hf_token(token: str):
+                """Save the HuggingFace token to server-side storage."""
+                from src.services.token_store import get_tokens, save_tokens
+
+                token = token or ""
+
+                # Don't overwrite existing tokens with empty values
+                # (this can happen when the page loads and populates textboxes)
+                if not token:
+                    existing = get_tokens()
+                    if existing.hf_token:
+                        # Keep existing token, just update status
+                        return _token_status_html(True)
+                    return _token_status_html(False)
+
+                save_tokens(hf_token=token)
+                logger.info("Saved HF token (len=%d)", len(token))
+                return _token_status_html(True)
+
+            def _save_civitai_token(token: str):
+                """Save the CivitAI token to server-side storage."""
+                from src.services.token_store import get_tokens, save_tokens
+
+                token = token or ""
+
+                # Don't overwrite existing tokens with empty values
+                # (this can happen when the page loads and populates textboxes)
+                if not token:
+                    existing = get_tokens()
+                    if existing.civitai_token:
+                        # Keep existing token, just update status
+                        return _token_status_html(True)
+                    return _token_status_html(False)
+
+                save_tokens(civitai_token=token)
+                logger.info("Saved CivitAI token (len=%d)", len(token))
+                return _token_status_html(True)
+
+            hf_token_input.change(
+                fn=_save_hf_token,
+                inputs=[hf_token_input],
+                outputs=[hf_status_html],
+            )
+
+            civitai_token_input.change(
+                fn=_save_civitai_token,
+                inputs=[civitai_token_input],
+                outputs=[civitai_status_html],
+            )
+
+    return hf_token_input, civitai_token_input, hf_status_html, civitai_status_html
+
+
 def _build_model_manager_tab() -> None:
     """Render the Model Manager tab inside a Gradio Blocks context."""
 
@@ -1907,10 +2041,6 @@ def _build_model_manager_tab() -> None:
         # Section A: CivitAI Download
         # ----------------------------------------------------------------
         with gr.Accordion("📥 Download from CivitAI", open=True):
-            # Re-use the same BrowserState key as the setup wizard so the
-            # token is shared between both UIs.
-            civitai_token_state = gr.BrowserState("", storage_key="ait_civitai_token")
-
             with gr.Row():
                 civitai_url_input = gr.Textbox(
                     label="CivitAI URL or Model ID",
@@ -1918,12 +2048,6 @@ def _build_model_manager_tab() -> None:
                     scale=4,
                 )
                 preview_btn = gr.Button("🔍 Preview", variant="secondary", scale=1)
-
-            civitai_token_input = gr.Textbox(
-                label="CivitAI API Token (optional — required for NSFW / early-access models)",
-                placeholder="Paste your CivitAI API token here",
-                type="password",
-            )
 
             preview_html = gr.HTML(
                 value="",
@@ -1954,7 +2078,13 @@ def _build_model_manager_tab() -> None:
             # ------------------------------------------------------------------
             # Preview handler
             # ------------------------------------------------------------------
-            def on_preview(url_or_id: str, token: str):
+            def on_preview(url_or_id: str):
+                from src.services.token_store import get_tokens
+
+                # Get token from server-side storage
+                tokens = get_tokens()
+                token = tokens.civitai_token or ""
+
                 if not url_or_id.strip():
                     return (
                         '<p style="color:#f88;">⚠️ Please enter a CivitAI URL or model ID.</p>',
@@ -1989,14 +2119,20 @@ def _build_model_manager_tab() -> None:
 
             preview_btn.click(
                 fn=on_preview,
-                inputs=[civitai_url_input, civitai_token_input],
+                inputs=[civitai_url_input],
                 outputs=[preview_html, download_civitai_btn, _preview_info_state],
             )
 
             # ------------------------------------------------------------------
             # Download handler
             # ------------------------------------------------------------------
-            def on_download_civitai(url_or_id: str, token: str):
+            def on_download_civitai(url_or_id: str):
+                from src.services.token_store import get_tokens
+
+                # Get token from server-side storage
+                tokens = get_tokens()
+                token = tokens.civitai_token or ""
+
                 if not url_or_id.strip():
                     return "⚠️ No URL/ID provided."
                 try:
@@ -2018,7 +2154,7 @@ def _build_model_manager_tab() -> None:
 
             download_civitai_btn.click(
                 fn=on_download_civitai,
-                inputs=[civitai_url_input, civitai_token_input],
+                inputs=[civitai_url_input],
                 outputs=[download_status],
             )
 

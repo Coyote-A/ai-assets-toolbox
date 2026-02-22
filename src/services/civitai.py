@@ -9,6 +9,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 CIVITAI_API_BASE = "https://civitai.com/api/v1"
+CIVITAI_DOWNLOAD_BASE = "https://civitai.com/api/download/models"
 
 
 @dataclass
@@ -183,8 +184,11 @@ def fetch_model_info(
 
         # ------------------------------------------------------------------
         # Build download URL
+        # The CivitAI download endpoint is /api/download/models/{versionId},
+        # NOT /api/v1/model-versions/{id}/download (which is not a valid endpoint).
+        # The API token is appended as a query parameter at download time.
         # ------------------------------------------------------------------
-        download_url = f"{CIVITAI_API_BASE}/model-versions/{version_id}/download"
+        download_url = f"{CIVITAI_DOWNLOAD_BASE}/{version_id}"
 
         # ------------------------------------------------------------------
         # File size: CivitAI reports sizeKB as a float

@@ -1151,7 +1151,17 @@ def _apply_loras(pipe: Any, loras: list[dict], loras_dir: str) -> list[str]:
                         break
 
         if not os.path.isfile(lora_path):
+            # --- Diagnostic: list what files actually exist ---
             logger.warning("Skipping LoRA '%s' — file not found at '%s'", adapter_name, lora_path)
+            for diag_dir, diag_label in [(LORAS_SUBDIR, "LORAS_SUBDIR"), (loras_dir, "loras_dir")]:
+                if os.path.isdir(diag_dir):
+                    files = os.listdir(diag_dir)
+                    logger.warning(
+                        "  [diag] %s (%s) contains %d files: %s",
+                        diag_label, diag_dir, len(files), files[:20],
+                    )
+                else:
+                    logger.warning("  [diag] %s (%s) does not exist", diag_label, diag_dir)
             continue
 
         logger.info("Loading LoRA '%s' (weight=%.2f) from '%s'", adapter_name, weight, lora_path)

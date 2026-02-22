@@ -303,12 +303,16 @@ class DownloadService:
     # ------------------------------------------------------------------
 
     @modal.method()
-    def download_all(self, hf_token: str | None = None) -> dict:
+    def download_all(self, hf_token: str | None = None, civitai_token: str | None = None) -> dict:
         """
         Download every model that is not yet marked as complete.
 
         Models are downloaded sequentially.  Returns the final status dict
         (same shape as :meth:`check_status`).
+
+        Args:
+            hf_token: HuggingFace API token for gated models.
+            civitai_token: CivitAI API token for NSFW/early-access models.
         """
         manifest = read_manifest(MODELS_MOUNT_PATH)
         for entry in ALL_MODELS:
@@ -384,8 +388,12 @@ class DownloadService:
             logger.info("LoRA %d already present at %s — skipping.", civitai_model_id, dest_path)
             return {"status": "already_complete", "path": dest_path}
 
-        url = f"https://civitai.com/api/v1/model-versions/{civitai_model_id}/download"
-        headers = {"Authorization": f"Bearer {civitai_token}"}
+        # CivitAI download endpoint: /api/download/models/{versionId}?token={api_key}
+        # The token must be passed as a query parameter, not as a Bearer header.
+        url = f"https://civitai.com/api/download/models/{civitai_model_id}"
+        params: dict = {}
+        if civitai_token:
+            params["token"] = civitai_token
 
         logger.info("Downloading LoRA %d from CivitAI → %s", civitai_model_id, dest_path)
         partial_path = dest_path + ".partial"
@@ -393,11 +401,38 @@ class DownloadService:
         try:
             import requests  # lazy import — only available in download_image
             os.makedirs(LORAS_MOUNT_PATH, exist_ok=True)
-            with requests.get(url, headers=headers, stream=True, timeout=600) as resp:
+            with requests.get(url, params=params, stream=True, timeout=600) as resp:
                 resp.raise_for_status()
+                content_type = resp.headers.get("Content-Type", "")
+                if "json" in content_type or "html" in content_type:
+                    logger.error(
+                        "CivitAI returned non-binary response (Content-Type=%r) "
+                        "for model_id=%d. Model may require auth or is gated.",
+                        content_type, civitai_model_id,
+                    )
+                    return {
+                        "status": "error",
+                        "error": (
+                            f"CivitAI returned {content_type} instead of a model file. "
+                            "Check your API token and model access."
+                        ),
+                    }
                 with open(partial_path, "wb") as fh:
                     for chunk in resp.iter_content(chunk_size=1024 * 1024):
                         fh.write(chunk)
+            actual_size = os.path.getsize(partial_path)
+            if actual_size < 1024:
+                with open(partial_path, "rb") as fh:
+                    sample = fh.read(500)
+                logger.error(
+                    "Downloaded LoRA file is suspiciously small (%d bytes). Sample: %s",
+                    actual_size, sample,
+                )
+                os.remove(partial_path)
+                return {
+                    "status": "error",
+                    "error": f"Downloaded file is only {actual_size} bytes — likely not a model file.",
+                }
             # Atomic rename
             os.rename(partial_path, dest_path)
         except Exception as exc:  # noqa: BLE001
@@ -473,21 +508,71 @@ class DownloadService:
 
         try:
             import requests  # lazy import — only available in download_image
-            headers: dict[str, str] = {}
-            if civitai_token:
-                headers["Authorization"] = f"Bearer {civitai_token}"
 
-            resp = requests.get(civitai_info.download_url, headers=headers, stream=True, timeout=600)
+            # CivitAI download endpoint: /api/download/models/{versionId}?token={api_key}
+            # The token must be passed as a query parameter, not as a Bearer header.
+            params: dict = {}
+            if civitai_token:
+                params["token"] = civitai_token
+
+            resp = requests.get(civitai_info.download_url, params=params, stream=True, timeout=600)
             resp.raise_for_status()
+
+            content_type = resp.headers.get("Content-Type", "")
+            if "json" in content_type or "html" in content_type:
+                logger.error(
+                    "CivitAI returned non-binary response (Content-Type=%r). "
+                    "The model may require a valid CivitAI API token or may be "
+                    "gated (Early Access). Final URL: %s",
+                    content_type,
+                    resp.url,
+                )
+                return {
+                    "success": False,
+                    "model_info": None,
+                    "error": (
+                        f"CivitAI returned {content_type} instead of a model file. "
+                        "The model may require a valid CivitAI API token or may be "
+                        "gated (Early Access). Please check your token and model access."
+                    ),
+                }
 
             with open(partial_path, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=8 * 1024 * 1024):
                     if chunk:
                         f.write(chunk)
 
+            actual_size = os.path.getsize(partial_path)
+            logger.info(
+                "Downloaded %s: %d bytes (expected ~%d bytes)",
+                civitai_info.filename,
+                actual_size,
+                civitai_info.size_bytes,
+            )
+            if actual_size < 1024:
+                with open(partial_path, "rb") as f:
+                    sample = f.read(500)
+                logger.error(
+                    "Downloaded file is suspiciously small (%d bytes). "
+                    "Content sample: %s",
+                    actual_size,
+                    sample,
+                )
+                os.remove(partial_path)
+                return {
+                    "success": False,
+                    "model_info": None,
+                    "error": (
+                        f"Downloaded file is only {actual_size} bytes — expected a "
+                        f"model file of ~{civitai_info.size_bytes} bytes. "
+                        "CivitAI may have returned an error page instead of the "
+                        "model. Check your API token and model access permissions."
+                    ),
+                }
+
             # Atomic rename
             os.replace(partial_path, target_path)
-            logger.info("Download complete: %s", target_path)
+            logger.info("Download complete: %s (%d bytes)", target_path, actual_size)
 
         except Exception as e:  # noqa: BLE001
             # Cleanup partial

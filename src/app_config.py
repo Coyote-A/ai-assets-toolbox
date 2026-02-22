@@ -93,7 +93,7 @@ upscale_image = (
 gradio_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        "gradio>=6.0.0",
+        "gradio>=6.6.0",
         "fastapi",
         "Pillow>=10.0.0",
         "numpy",
@@ -130,3 +130,12 @@ download_image = (
 
 models_volume = modal.Volume.from_name(MODELS_VOLUME_NAME, create_if_missing=True)
 lora_volume = modal.Volume.from_name(LORAS_VOLUME_NAME, create_if_missing=True)
+
+# ---------------------------------------------------------------------------
+# Token storage (Modal Dict for server-side persistence)
+# ---------------------------------------------------------------------------
+# Stores API tokens (HuggingFace, CivitAI) keyed by browser session ID.
+# This persists across server restarts, unlike Gradio's BrowserState which
+# uses encryption keys that rotate on server restart.
+
+token_store = modal.Dict.from_name("ai-toolbox-tokens", create_if_missing=True)

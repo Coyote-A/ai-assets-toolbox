@@ -51,12 +51,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 DEFAULT_SYSTEM_PROMPT = (
-    "Describe the visual content of this image tile for a Stable Diffusion prompt. "
-    "Focus ONLY on objects, elements, and composition - NOT style or aesthetic. "
-    "Output ONLY comma-separated keywords, each keyword appears ONCE, no repetitions. "
-    "Keep it brief - maximum 10-15 keywords. "
-    "NO explanations, NO markdown, NO headers, NO introductory text. "
-    "Example output: small pond, blue water, dirt path, grass, rocks, trees"
+    "List the main objects in this image as a short comma-separated list. "
+    "Maximum 8-10 keywords. Each keyword appears ONCE. "
+    "NO duplicate words, NO consecutive commas, NO explanations, NO markdown. "
+    "Example: pond, stones, green meadow, mushrooms, wildflowers, wooden fence"
 )
 
 # ---------------------------------------------------------------------------
@@ -121,7 +119,7 @@ class CaptionService:
         request arrives.
         """
         import torch
-        from transformers import AutoModelForCausalLM, AutoProcessor
+        from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
         # qwen_vl_utils must be imported before AutoProcessor so that the
         # Qwen VL processor classes are registered with the transformers
@@ -187,9 +185,9 @@ class CaptionService:
         self._models_ready = True
         logger.info("Loading Qwen2.5-VL-3B from '%s'", model_dir)
 
-        self._model = AutoModelForCausalLM.from_pretrained(
+        self._model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_dir,
-            torch_dtype=torch.float16,
+            dtype=torch.float16,
             device_map="auto",
             local_files_only=True,
         )
@@ -215,6 +213,55 @@ class CaptionService:
 
         return Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
+    @staticmethod
+    def _clean_caption(caption: str, max_tokens: int = 60) -> str:
+        """
+        Post-process a raw model caption to remove artefacts and enforce length.
+
+        Steps
+        -----
+        1. Replace runs of commas (with optional surrounding whitespace) with a
+           single ``", "`` separator.
+        2. Split on commas, strip each keyword, drop empty strings.
+        3. Re-join with ``", "``.
+        4. Truncate to *max_tokens* whitespace-split tokens so the result stays
+           within CLIP's 77-token limit (leaving headroom for any prefix tokens
+           added by the CLIP tokenizer).
+
+        Parameters
+        ----------
+        caption:
+            Raw string from the model.
+        max_tokens:
+            Maximum number of space-separated tokens to keep.  Defaults to 60,
+            which comfortably fits inside CLIP's 77-token window.
+
+        Returns
+        -------
+        str
+            Cleaned, length-bounded caption.
+        """
+        import re
+
+        # Collapse runs of commas / whitespace-comma-whitespace into one comma
+        caption = re.sub(r"[\s,]*,[\s,]*", ", ", caption)
+
+        # Split, strip, and drop empty keywords
+        keywords = [kw.strip() for kw in caption.split(",")]
+        keywords = [kw for kw in keywords if kw]
+
+        # Re-join
+        cleaned = ", ".join(keywords)
+
+        # Truncate to max_tokens whitespace tokens
+        tokens = cleaned.split()
+        if len(tokens) > max_tokens:
+            cleaned = " ".join(tokens[:max_tokens])
+            # If we cut mid-keyword-phrase, strip a trailing comma
+            cleaned = cleaned.rstrip(", ")
+
+        return cleaned
+
     def _caption_single(
         self,
         image,
@@ -231,7 +278,7 @@ class CaptionService:
         system_prompt:
             Instruction text prepended to the image in the chat message.
         max_new_tokens:
-            Maximum number of tokens to generate.  Kept low (≤300) so the
+            Maximum number of tokens to generate.  Kept low (≤75) so the
             model outputs concise keyword lists without padding.
 
         Returns
@@ -241,15 +288,22 @@ class CaptionService:
         """
         import torch
 
-        # Build the Qwen2.5-VL chat-format message list
+        # Build the Qwen2.5-VL chat-format message list.
+        # A dedicated "system" role message improves instruction-following for
+        # brevity constraints compared to embedding the instruction only in the
+        # user turn.
         messages = [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image},
-                    {"type": "text", "text": system_prompt},
+                    {"type": "text", "text": "Describe the main objects in this image."},
                 ],
-            }
+            },
         ]
 
         # Convert messages to the model's expected text format
@@ -296,7 +350,7 @@ class CaptionService:
         self,
         tiles: list[dict],
         system_prompt: Optional[str] = None,
-        max_tokens: int = 100,
+        max_tokens: int = 50,
     ) -> dict[str, str]:
         """
         Generate captions for one or more image tiles.
@@ -366,12 +420,18 @@ class CaptionService:
                 pil_image.height,
             )
 
-            caption = self._caption_single(
+            raw_caption = self._caption_single(
                 pil_image,
                 system_prompt=prompt,
                 max_new_tokens=max_tokens,
             )
-            logger.info("Tile '%s' → %s", tile_id, caption[:80])
+            caption = self._clean_caption(raw_caption)
+            logger.info(
+                "Tile '%s' → raw=%r  cleaned=%r",
+                tile_id,
+                raw_caption[:120],
+                caption,
+            )
             captions[tile_id] = caption
 
         logger.info("caption_tiles: completed %d tile(s)", len(captions))

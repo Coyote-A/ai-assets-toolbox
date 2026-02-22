@@ -13,7 +13,8 @@ This single entrypoint registers:
 from __future__ import annotations
 
 import modal
-from src.app_config import app, gradio_image
+from src.app_config import app, gradio_image, lora_volume
+from src.services.model_registry import LORAS_MOUNT_PATH
 
 # Import GPU services to register them with the app
 from src.gpu import CaptionService, UpscaleService  # noqa: F401
@@ -29,6 +30,9 @@ from src.ui import create_gradio_app
     image=gradio_image,
     scaledown_window=600,  # 10 min idle for UI
     timeout=3600,  # 1 hour max
+    volumes={
+        LORAS_MOUNT_PATH: lora_volume,  # For token storage
+    },
 )
 @modal.concurrent(max_inputs=100)  # Gradio handles many users
 @modal.asgi_app()
