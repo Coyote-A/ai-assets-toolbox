@@ -67,11 +67,12 @@ def _write_progress(
         json.dump(progress, fh, indent=2)
 
 
-def _mark_complete(volume_path: str, model_key: str) -> None:
+def _mark_complete(volume_path: str, model_key: str, repo_id: str) -> None:
     """Record *model_key* as fully downloaded in ``.manifest.json``."""
     manifest = read_manifest(volume_path)
     manifest[model_key] = {
         "completed": True,
+        "repo_id": repo_id,
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
     }
     write_manifest(manifest, volume_path)
@@ -222,16 +223,38 @@ class DownloadService:
         # Reload volume to see latest state from other containers
         models_volume.reload()
 
-        manifest = read_manifest(MODELS_MOUNT_PATH)
-        if key in manifest and manifest[key].get("completed", False):
-            logger.info("Model %r already downloaded — skipping.", key)
-            return {"status": "already_complete"}
-
         try:
             entry = get_model(key)
         except KeyError:
             logger.error("Unknown model key: %r", key)
             return {"status": "error", "error": f"Unknown model key: {key!r}"}
+
+        manifest = read_manifest(MODELS_MOUNT_PATH)
+        if key in manifest and manifest[key].get("completed", False):
+            # Check if the repo_id in the manifest matches the registry.
+            # If they differ the cached weights are stale (e.g. model was
+            # switched from Qwen2.5-VL to Qwen3-VL) and must be replaced.
+            manifest_repo_id = manifest[key].get("repo_id")
+            if manifest_repo_id == entry.repo_id:
+                logger.info("Model %r already downloaded — skipping.", key)
+                return {"status": "already_complete"}
+            else:
+                logger.warning(
+                    "Model %r repo_id mismatch: manifest has %r, registry has %r — "
+                    "deleting stale weights and re-downloading.",
+                    key,
+                    manifest_repo_id,
+                    entry.repo_id,
+                )
+                # Delete old model directory
+                old_model_dir = os.path.join(MODELS_MOUNT_PATH, entry.local_dir)
+                if os.path.exists(old_model_dir):
+                    shutil.rmtree(old_model_dir)
+                    logger.info("Deleted stale model directory: %s", old_model_dir)
+                # Remove stale manifest entry
+                del manifest[key]
+                write_manifest(manifest, MODELS_MOUNT_PATH)
+                models_volume.commit()
 
         logger.info("Starting download for model %r (%s)", key, entry.description)
         _write_progress(MODELS_MOUNT_PATH, key, "downloading", percentage=0.0)
@@ -248,7 +271,7 @@ class DownloadService:
 
         # Mark complete
         _write_progress(MODELS_MOUNT_PATH, key, "completed", percentage=100.0)
-        _mark_complete(MODELS_MOUNT_PATH, key)
+        _mark_complete(MODELS_MOUNT_PATH, key, entry.repo_id)
         models_volume.commit()
         logger.info("Model %r downloaded successfully.", key)
         return {"status": "completed"}

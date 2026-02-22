@@ -1,5 +1,5 @@
 """
-Caption service — Qwen3-VL-2B-Instruct on a Modal T4 GPU container.
+Caption service — Qwen2.5-VL-3B-Instruct on a Modal T4 GPU container.
 
 This module is part of the unified Modal app (``modal.App("ai-toolbox")``).
 It does NOT define its own ``modal.App``; instead it imports ``app`` and
@@ -63,7 +63,7 @@ DEFAULT_SYSTEM_PROMPT = (
 
 
 @app.cls(
-    # T4 has 16 GB VRAM; Qwen3-VL-2B in float16 uses ~4-5 GB — plenty of room.
+    # T4 has 16 GB VRAM; Qwen2.5-VL-3B in float16 uses ~6 GB — plenty of room.
     gpu="T4",
     image=caption_image,
     # Keep the container alive for 5 minutes after the last request so
@@ -77,7 +77,7 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 class CaptionService:
     """
-    Qwen3-VL-2B-Instruct captioning service.
+    Qwen2.5-VL-3B-Instruct captioning service.
 
     Lifecycle
     ---------
@@ -112,14 +112,14 @@ class CaptionService:
     @modal.enter()
     def load_model(self) -> None:
         """
-        Load Qwen3-VL-2B-Instruct once when the container starts.
+        Load Qwen2.5-VL-3B-Instruct once when the container starts.
 
         Called exactly once per container instance by Modal before any method
         receives a call.  Loading here means the model is always warm when a
         request arrives.
         """
         import torch
-        from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+        from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 
         # qwen_vl_utils must be imported before AutoProcessor so that the
         # Qwen VL processor classes are registered with the transformers
@@ -141,9 +141,9 @@ class CaptionService:
             return
 
         self._models_ready = True
-        logger.info("Loading Qwen3-VL-2B from '%s'", model_dir)
+        logger.info("Loading Qwen2.5-VL-3B from '%s'", model_dir)
 
-        self._model = Qwen3VLForConditionalGeneration.from_pretrained(
+        self._model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_dir,
             torch_dtype=torch.float16,
             device_map="auto",
@@ -157,7 +157,7 @@ class CaptionService:
         )
 
         logger.info(
-            "Qwen3-VL-2B loaded on device: %s",
+            "Qwen2.5-VL-3B loaded on device: %s",
             next(self._model.parameters()).device,
         )
 
@@ -178,7 +178,7 @@ class CaptionService:
         max_new_tokens: int,
     ) -> str:
         """
-        Run Qwen3-VL inference on a single PIL image.
+        Run Qwen2.5-VL inference on a single PIL image.
 
         Parameters
         ----------
@@ -197,7 +197,7 @@ class CaptionService:
         """
         import torch
 
-        # Build the Qwen3-VL chat-format message list
+        # Build the Qwen2.5-VL chat-format message list
         messages = [
             {
                 "role": "user",

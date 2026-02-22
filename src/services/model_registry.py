@@ -130,12 +130,12 @@ ALL_MODELS: list[ModelEntry] = [
     ),
     ModelEntry(
         key="qwen3-vl-2b",
-        repo_id="Qwen/Qwen3-VL-2B-Instruct",
+        repo_id="Qwen/Qwen2.5-VL-3B-Instruct",
         filename=None,  # full repo
         subfolder=None,
         local_dir="qwen3-vl-2b",
-        size_bytes=4_000_000_000,
-        description="Qwen3-VL-2B-Instruct (captioning)",
+        size_bytes=6_000_000_000,
+        description="Qwen2.5-VL-3B-Instruct (captioning)",
         service="caption",
     ),
 ]
@@ -190,9 +190,26 @@ def write_manifest(manifest: dict, volume_path: str = MODELS_MOUNT_PATH) -> None
 
 
 def is_model_downloaded(key: str, volume_path: str = MODELS_MOUNT_PATH) -> bool:
-    """Return ``True`` if *key* is recorded as downloaded in the manifest."""
+    """Return ``True`` if *key* is recorded as downloaded in the manifest
+    **and** the manifest's ``repo_id`` matches the current registry entry.
+
+    If the ``repo_id`` stored in the manifest differs from the registry (e.g.
+    the model was switched from Qwen2.5-VL to Qwen3-VL), the cached weights
+    are considered stale and the function returns ``False``.
+    """
     manifest = read_manifest(volume_path)
-    return bool(manifest.get(key, {}).get("downloaded", False))
+    entry_data = manifest.get(key, {})
+    if not entry_data.get("completed", False) and not entry_data.get("downloaded", False):
+        return False
+    # Verify repo_id matches the current registry entry
+    try:
+        registry_entry = get_model(key)
+    except KeyError:
+        return False
+    manifest_repo_id = entry_data.get("repo_id")
+    if manifest_repo_id is not None and manifest_repo_id != registry_entry.repo_id:
+        return False
+    return True
 
 
 def all_models_ready(volume_path: str = MODELS_MOUNT_PATH) -> bool:
