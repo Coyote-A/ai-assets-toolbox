@@ -152,6 +152,8 @@ class CaptionService:
         self._processor = AutoProcessor.from_pretrained(
             model_dir,
             local_files_only=True,
+            min_pixels=256 * 28 * 28,
+            max_pixels=1280 * 28 * 28,
         )
 
         logger.info(
