@@ -303,6 +303,7 @@ _TILE_ONCLICK_JS = (
     "var ns=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set;"
     "ns.call(tb,wasSelected?'-1':el.dataset.idx);"
     "tb.dispatchEvent(new Event('input',{bubbles:true}));"
+    "tb.dispatchEvent(new Event('change',{bubbles:true}));"
     "}"
     "})(this)"
 )
@@ -854,6 +855,7 @@ def _build_upscale_tab() -> None:
                 gr.Markdown("### 🗂️ Tile Grid — click to select")
                 tile_grid_html = gr.HTML(
                     value="<p style='color:#888; padding:16px;'>Upload an image to see the tile grid.</p>",
+                    sanitize_html=False,
                 )
 
                 # ---- Selected tile detail panel ----
