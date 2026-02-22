@@ -6,8 +6,6 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-import requests
-
 logger = logging.getLogger(__name__)
 
 CIVITAI_API_BASE = "https://civitai.com/api/v1"
@@ -90,6 +88,7 @@ def fetch_model_info(
     Returns:
         A :class:`CivitAIModelInfo` instance, or ``None`` on failure.
     """
+    import requests  # lazy import — only available in download_image
     headers: dict[str, str] = {}
     if api_token:
         headers["Authorization"] = f"Bearer {api_token}"

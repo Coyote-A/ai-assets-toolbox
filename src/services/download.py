@@ -15,7 +15,6 @@ import shutil
 from datetime import datetime, timezone
 
 import modal
-import requests
 
 from src.app_config import app, download_image, lora_volume, models_volume
 from src.services.civitai import CivitAIModelInfo, fetch_model_info, parse_civitai_input
@@ -372,6 +371,7 @@ class DownloadService:
         partial_path = dest_path + ".partial"
 
         try:
+            import requests  # lazy import — only available in download_image
             os.makedirs(LORAS_MOUNT_PATH, exist_ok=True)
             with requests.get(url, headers=headers, stream=True, timeout=600) as resp:
                 resp.raise_for_status()
@@ -452,6 +452,7 @@ class DownloadService:
         partial_path = target_path + ".partial"
 
         try:
+            import requests  # lazy import — only available in download_image
             headers: dict[str, str] = {}
             if civitai_token:
                 headers["Authorization"] = f"Bearer {civitai_token}"
