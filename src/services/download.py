@@ -112,6 +112,22 @@ def _download_hf_model(entry: ModelEntry, hf_token: str | None) -> None:
             local_dir=target_dir,
             token=hf_token,
         )
+        # hf_hub_download places the file at {local_dir}/{subfolder}/{filename}
+        # when subfolder is set.  Move it up to {local_dir}/{filename} so that
+        # the rest of the codebase can find it at the expected flat path.
+        if entry.subfolder:
+            nested_path = os.path.join(target_dir, entry.subfolder, entry.filename)
+            flat_path = os.path.join(target_dir, entry.filename)
+            if os.path.exists(nested_path) and not os.path.exists(flat_path):
+                shutil.move(nested_path, flat_path)
+                logger.info(
+                    "Moved %s → %s (flattened subfolder)",
+                    nested_path,
+                    flat_path,
+                )
+                # Remove the now-empty subfolder tree
+                subfolder_root = os.path.join(target_dir, entry.subfolder.split("/")[0])
+                shutil.rmtree(subfolder_root, ignore_errors=True)
     elif entry.subfolder is None:
         # Full repo snapshot.
         logger.info("Snapshot-downloading %s → %s", entry.repo_id, target_dir)

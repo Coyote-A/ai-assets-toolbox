@@ -121,7 +121,7 @@ class CaptionService:
         request arrives.
         """
         import torch
-        from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+        from transformers import AutoModelForVision2Seq, AutoProcessor
 
         # qwen_vl_utils must be imported before AutoProcessor so that the
         # Qwen VL processor classes are registered with the transformers
@@ -143,26 +143,29 @@ class CaptionService:
             return
 
         # Architecture validation: read config.json and confirm the model type
-        # is Qwen2VLForConditionalGeneration (Qwen2.5-VL architecture).
-        # If the volume still has Qwen3-VL weights the architectures field will
-        # contain "Qwen2_5_VLForConditionalGeneration" or similar Qwen3 class
-        # names, which are incompatible with the Qwen2VL loader.
+        # is a known Qwen2-VL variant.  We accept both:
+        #   - "Qwen2VLForConditionalGeneration"   (Qwen2-VL)
+        #   - "Qwen2_5_VLForConditionalGeneration" (Qwen2.5-VL, note the underscore)
+        # Any other architecture indicates stale/wrong weights on the volume.
+        _ACCEPTED_ARCHITECTURES = {
+            "Qwen2VLForConditionalGeneration",
+            "Qwen2_5_VLForConditionalGeneration",
+        }
         config_path = os.path.join(model_dir, "config.json")
         if os.path.exists(config_path):
             try:
                 with open(config_path, encoding="utf-8") as _cfg_fh:
                     _cfg = json.load(_cfg_fh)
                 _architectures = _cfg.get("architectures", [])
-                _expected = "Qwen2VLForConditionalGeneration"
-                if _architectures and _expected not in _architectures:
+                if _architectures and not _ACCEPTED_ARCHITECTURES.intersection(_architectures):
                     logger.error(
                         "Wrong model architecture at %s: config.json reports %r "
-                        "but expected %r. "
+                        "but expected one of %r. "
                         "The volume likely has stale weights from a different repo. "
                         "Re-run the setup wizard to force a re-download.",
                         model_dir,
                         _architectures,
-                        _expected,
+                        sorted(_ACCEPTED_ARCHITECTURES),
                     )
                     self._models_ready = False
                     return
@@ -183,7 +186,7 @@ class CaptionService:
         self._models_ready = True
         logger.info("Loading Qwen2.5-VL-3B from '%s'", model_dir)
 
-        self._model = Qwen2VLForConditionalGeneration.from_pretrained(
+        self._model = AutoModelForVision2Seq.from_pretrained(
             model_dir,
             torch_dtype=torch.float16,
             device_map="auto",

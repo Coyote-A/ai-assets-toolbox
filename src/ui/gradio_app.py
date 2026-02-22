@@ -682,7 +682,7 @@ def _upscale_tiles_batch(
 
     # Build model_config and gen_params for UpscaleService
     active_loras = [
-        {"name": s["name"], "weight": s.get("weight", 1.0)}
+        {"name": s["name"], "filename": s.get("filename", ""), "weight": s.get("weight", 1.0)}
         for s in lora_states
         if s.get("enabled", True)
     ]
@@ -1339,6 +1339,7 @@ def _build_upscale_tab() -> None:
 
             for lora in loras:
                 name = lora.get("name") or lora.get("filename", "Unknown")
+                filename = lora.get("filename", "")
                 triggers = lora.get("trigger_words") or []
                 trigger_str = ", ".join(triggers) if triggers else "(no triggers)"
                 default_weight = lora.get("default_weight", 1.0)
@@ -1347,6 +1348,7 @@ def _build_upscale_tab() -> None:
                 weight = sel.get("weight", default_weight)
                 checked = "checked" if enabled else ""
                 # JS: update the hidden textbox with the full selections JSON
+                # data-name holds the display name; data-filename holds the actual file name
                 js_update = (
                     "function updateLoraSelections(){"
                     "  var rows = document.querySelectorAll('.lora-row-item');"
@@ -1356,8 +1358,8 @@ def _build_upscale_tab() -> None:
                     "    var sl = row.querySelector('input[type=range]');"
                     "    var lbl = row.querySelector('.lora-weight-label');"
                     "    if(cb && sl){"
-                    "      sels.push({name:cb.dataset.name,enabled:cb.checked,"
-                    "                 weight:parseFloat(sl.value)});"
+                    "      sels.push({name:cb.dataset.name,filename:cb.dataset.filename||'',"
+                    "                 enabled:cb.checked,weight:parseFloat(sl.value)});"
                     "      if(lbl) lbl.textContent = parseFloat(sl.value).toFixed(1);"
                     "    }"
                     "  });"
@@ -1371,7 +1373,7 @@ def _build_upscale_tab() -> None:
                 )
                 rows.append(
                     f'<div class="lora-row lora-row-item">'
-                    f'  <input type="checkbox" data-name="{name}" {checked}'
+                    f'  <input type="checkbox" data-name="{name}" data-filename="{filename}" {checked}'
                     f'    onchange="({js_update})();">'
                     f'  <div class="lora-name">'
                     f'    <div>{name}</div>'
@@ -1406,6 +1408,7 @@ def _build_upscale_tab() -> None:
             return [
                 {
                     "name": m.get("name") or m.get("filename", ""),
+                    "filename": m.get("filename", ""),
                     "enabled": True,
                     "weight": m.get("default_weight", 1.0),
                 }
@@ -1425,6 +1428,7 @@ def _build_upscale_tab() -> None:
             default_sels = [
                 {
                     "name": m.get("name") or m.get("filename", ""),
+                    "filename": m.get("filename", ""),
                     "enabled": True,
                     "weight": m.get("default_weight", 1.0),
                 }
@@ -1520,7 +1524,7 @@ def _build_upscale_tab() -> None:
                             })
 
                         active_loras = [
-                            {"name": s["name"], "weight": s.get("weight", 1.0)}
+                            {"name": s["name"], "filename": s.get("filename", ""), "weight": s.get("weight", 1.0)}
                             for s in lora_states
                             if s.get("enabled", True)
                         ]
