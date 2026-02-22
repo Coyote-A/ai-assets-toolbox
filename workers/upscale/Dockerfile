@@ -5,10 +5,6 @@
 # ============================================================
 FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
 
-# CivitAI API token — passed at build time to pre-download LoRAs.
-# Usage: docker build --build-arg CIVITAI_API_TOKEN=<token> ...
-ARG CIVITAI_API_TOKEN=""
-
 # Prevent interactive prompts during apt installs
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
@@ -94,22 +90,6 @@ RUN mkdir -p /app/models/clip-vit-h \
 # (After model downloads so code changes don't bust the model cache layers)
 # ---------------------------------------------------------------------------
 COPY . /app/
-
-# ---------------------------------------------------------------------------
-# Pre-download CivitAI LoRAs at build time (skipped if token is empty)
-# ---------------------------------------------------------------------------
-# CIVITAI_API_TOKEN is passed via --build-arg at build time.
-# The files are written to /runpod-volume/models/loras/ — the same path that
-# apply_loras() and ensure_loras_downloaded() use at runtime.
-# If the token is absent the step is a no-op (ensure_loras_downloaded logs a
-# warning and returns without downloading).
-RUN CIVITAI_API_TOKEN="${CIVITAI_API_TOKEN}" \
-    python -c "\
-import os, logging; \
-logging.basicConfig(level=logging.INFO, format='[build-lora] %(message)s'); \
-os.environ['CIVITAI_API_TOKEN'] = os.environ.get('CIVITAI_API_TOKEN', ''); \
-from model_manager import ensure_loras_downloaded; \
-ensure_loras_downloaded()"
 
 # ---------------------------------------------------------------------------
 # Startup

@@ -16,10 +16,7 @@ param (
     [string]$Worker = "all",
 
     [Parameter(Mandatory = $false, Position = 2, HelpMessage = "Image tag (default: latest)")]
-    [string]$Tag = "latest",
-
-    [Parameter(Mandatory = $false, HelpMessage = "CivitAI API token for baking LoRAs into the upscale image at build time")]
-    [string]$CivitaiApiToken = $env:CIVITAI_API_TOKEN
+    [string]$Tag = "latest"
 )
 
 Set-StrictMode -Version Latest
@@ -51,21 +48,11 @@ function Build-And-Push {
     # Build
     # -----------------------------------------------------------------------
     Write-Host "[1/3] Building Docker image..." -ForegroundColor Yellow
-    if ($WorkerName -eq "upscale" -and $CivitaiApiToken) {
-        Write-Host "  Passing CIVITAI_API_TOKEN build arg to bake LoRAs into image..." -ForegroundColor DarkCyan
-        docker build `
-            --platform linux/amd64 `
-            --build-arg "CIVITAI_API_TOKEN=${CivitaiApiToken}" `
-            -t $FullImage `
-            -f $Dockerfile `
-            $Context
-    } else {
-        docker build `
-            --platform linux/amd64 `
-            -t $FullImage `
-            -f $Dockerfile `
-            $Context
-    }
+    docker build `
+        --platform linux/amd64 `
+        -t $FullImage `
+        -f $Dockerfile `
+        $Context
 
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Docker build failed with exit code $LASTEXITCODE"

@@ -6,11 +6,6 @@
 #   - Docker installed and running
 #   - Logged in to Docker Hub: docker login
 #   - Run from the repository root
-#
-# To bake CivitAI LoRAs into the upscale image at build time, set the
-# CIVITAI_API_TOKEN environment variable before running this script:
-#   export CIVITAI_API_TOKEN=your_token_here
-#   ./scripts/deploy.sh <username> upscale
 
 set -euo pipefail
 
@@ -22,16 +17,12 @@ if [[ $# -lt 1 ]]; then
   echo "  dockerhub_username  Your Docker Hub username"
   echo "  worker              Worker to deploy: upscale, caption, or all (default: all)"
   echo "  tag                 Image tag (default: latest)"
-  echo ""
-  echo "  Set CIVITAI_API_TOKEN env var to bake LoRAs into the upscale image at build time."
   exit 1
 fi
 
 DOCKERHUB_USERNAME="$1"
 WORKER="${2:-all}"
 TAG="${3:-latest}"
-# Read CivitAI token from environment (empty string if not set)
-CIVITAI_API_TOKEN="${CIVITAI_API_TOKEN:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -54,21 +45,11 @@ build_and_push() {
   echo ""
 
   echo "[1/3] Building Docker image..."
-  if [[ "${worker_name}" == "upscale" && -n "${CIVITAI_API_TOKEN}" ]]; then
-    echo "  Passing CIVITAI_API_TOKEN build arg to bake LoRAs into image..."
-    docker build \
-      --platform linux/amd64 \
-      --build-arg "CIVITAI_API_TOKEN=${CIVITAI_API_TOKEN}" \
-      -t "${full_image}" \
-      -f "${context}/Dockerfile" \
-      "${context}"
-  else
-    docker build \
-      --platform linux/amd64 \
-      -t "${full_image}" \
-      -f "${context}/Dockerfile" \
-      "${context}"
-  fi
+  docker build \
+    --platform linux/amd64 \
+    -t "${full_image}" \
+    -f "${context}/Dockerfile" \
+    "${context}"
 
   echo ""
   echo "[2/3] Tagging image as ${full_image}..."
