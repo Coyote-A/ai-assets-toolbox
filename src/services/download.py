@@ -113,11 +113,14 @@ def _download_hf_model(entry: ModelEntry, hf_token: str | None) -> None:
             token=hf_token,
         )
     elif entry.subfolder is None:
-        # Full repo snapshot
+        # Full repo snapshot.
+        # local_dir_use_symlinks=False ensures all files are written directly
+        # to target_dir rather than being symlinked from a hidden .cache tree.
         logger.info("Snapshot-downloading %s → %s", entry.repo_id, target_dir)
         snapshot_download(
             repo_id=entry.repo_id,
             local_dir=target_dir,
+            local_dir_use_symlinks=False,
             token=hf_token,
         )
     else:
@@ -132,6 +135,7 @@ def _download_hf_model(entry: ModelEntry, hf_token: str | None) -> None:
             repo_id=entry.repo_id,
             local_dir=target_dir,
             allow_patterns=[f"{entry.subfolder}/**"],
+            local_dir_use_symlinks=False,
             token=hf_token,
         )
         # Move files from the subfolder up to target_dir
@@ -256,7 +260,11 @@ class DownloadService:
                 # Remove stale manifest entry
                 del manifest[key]
                 write_manifest(manifest, MODELS_MOUNT_PATH)
+                # Commit the deletion so other containers see the clean state,
+                # then reload to confirm the volume is consistent before we
+                # start writing new files.
                 models_volume.commit()
+                models_volume.reload()
 
         logger.info("Starting download for model %r (%s)", key, entry.description)
         _write_progress(MODELS_MOUNT_PATH, key, "downloading", percentage=0.0)

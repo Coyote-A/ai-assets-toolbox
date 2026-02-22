@@ -201,13 +201,16 @@ def is_model_downloaded(key: str, volume_path: str = MODELS_MOUNT_PATH) -> bool:
     entry_data = manifest.get(key, {})
     if not entry_data.get("completed", False) and not entry_data.get("downloaded", False):
         return False
-    # Verify repo_id matches the current registry entry
+    # Verify repo_id matches the current registry entry.
+    # If the manifest entry has no repo_id (written before repo_id tracking was
+    # added) we treat it as stale so the weights are re-downloaded with the
+    # correct repo.
     try:
         registry_entry = get_model(key)
     except KeyError:
         return False
     manifest_repo_id = entry_data.get("repo_id")
-    if manifest_repo_id is not None and manifest_repo_id != registry_entry.repo_id:
+    if manifest_repo_id != registry_entry.repo_id:
         return False
     return True
 
