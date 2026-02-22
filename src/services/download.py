@@ -114,13 +114,10 @@ def _download_hf_model(entry: ModelEntry, hf_token: str | None) -> None:
         )
     elif entry.subfolder is None:
         # Full repo snapshot.
-        # local_dir_use_symlinks=False ensures all files are written directly
-        # to target_dir rather than being symlinked from a hidden .cache tree.
         logger.info("Snapshot-downloading %s → %s", entry.repo_id, target_dir)
         snapshot_download(
             repo_id=entry.repo_id,
             local_dir=target_dir,
-            local_dir_use_symlinks=False,
             token=hf_token,
         )
     else:
@@ -135,7 +132,6 @@ def _download_hf_model(entry: ModelEntry, hf_token: str | None) -> None:
             repo_id=entry.repo_id,
             local_dir=target_dir,
             allow_patterns=[f"{entry.subfolder}/**"],
-            local_dir_use_symlinks=False,
             token=hf_token,
         )
         # Move files from the subfolder up to target_dir
