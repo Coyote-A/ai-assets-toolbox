@@ -19,14 +19,22 @@ set -euo pipefail
 echo "[start.sh] Starting AI Assets Toolbox — Upscale Worker"
 
 # ---------------------------------------------------------------------------
-# Ensure network volume directories exist (LoRAs + outputs only)
+# Ensure runtime directories exist (LoRAs + outputs)
+# Use network volume when mounted; fall back to local container paths.
 # ---------------------------------------------------------------------------
 VOLUME_ROOT="${RUNPOD_VOLUME_PATH:-/runpod-volume}"
 
-echo "[start.sh] Ensuring runtime directories under ${VOLUME_ROOT}/"
-mkdir -p \
-    "${VOLUME_ROOT}/models/loras" \
-    "${VOLUME_ROOT}/outputs"
+if mountpoint -q "${VOLUME_ROOT}" 2>/dev/null; then
+    echo "[start.sh] Network volume detected at ${VOLUME_ROOT}/"
+    mkdir -p \
+        "${VOLUME_ROOT}/models/loras" \
+        "${VOLUME_ROOT}/outputs"
+else
+    echo "[start.sh] WARNING: Network volume not mounted at ${VOLUME_ROOT}/ — using local fallback paths"
+    mkdir -p \
+        "/app/models/loras" \
+        "/app/outputs"
+fi
 
 echo "[start.sh] Directory structure ready"
 

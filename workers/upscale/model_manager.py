@@ -7,9 +7,10 @@ At runtime the manager loads directly from those paths — no HF cache lookups,
 no network calls for pre-baked models.
 
 LoRA adapters are the only models loaded dynamically at runtime; they are
-expected to reside on the RunPod Network Volume at:
+stored on the RunPod Network Volume when available:
 
-    /runpod-volume/models/loras/   — LoRA .safetensors files
+    /runpod-volume/models/loras/   — LoRA .safetensors files (network volume)
+    /app/models/loras/             — fallback when network volume is not mounted
 """
 
 import gc
@@ -44,6 +45,8 @@ def apply_loras(pipe: Any, loras: list[dict]) -> list[str]:
     adapter_names: list[str] = []
     adapter_weights: list[float] = []
 
+    loras_dir = get_lora_dir()
+
     for lora in loras:
         name: str = lora.get("name", "")
         weight: float = float(lora.get("weight", 1.0))
@@ -53,11 +56,11 @@ def apply_loras(pipe: Any, loras: list[dict]) -> list[str]:
         # Resolve path — check HARDCODED_LORAS first, then raw filename
         if name in HARDCODED_LORAS:
             info = HARDCODED_LORAS[name]
-            lora_path = os.path.join(LORAS_DIR, info["filename"])
+            lora_path = os.path.join(loras_dir, info["filename"])
         else:
-            lora_path = os.path.join(LORAS_DIR, name)
+            lora_path = os.path.join(loras_dir, name)
             if not os.path.isfile(lora_path):
-                lora_path = os.path.join(LORAS_DIR, f"{name}.safetensors")
+                lora_path = os.path.join(loras_dir, f"{name}.safetensors")
 
         if not os.path.isfile(lora_path):
             logger.warning("Skipping LoRA '%s' — file not found at '%s'", name, lora_path)
@@ -113,8 +116,25 @@ CLIP_VIT_H_PATH = os.path.join(MODELS_DIR, "clip-vit-h")
 VOLUME_ROOT = os.environ.get("RUNPOD_VOLUME_PATH", "/runpod-volume")
 MODELS_ROOT = os.path.join(VOLUME_ROOT, "models")
 CHECKPOINTS_DIR = os.path.join(MODELS_ROOT, "checkpoints")
-LORAS_DIR = os.path.join(MODELS_ROOT, "loras")
 CONTROLNETS_DIR = os.path.join(MODELS_ROOT, "controlnets")
+
+
+def get_lora_dir() -> str:
+    """Get LoRA directory, with fallback for no network volume.
+
+    Returns the network-volume LoRA path when ``VOLUME_ROOT`` is a real
+    mount point, otherwise falls back to a local container path so the worker
+    can still function without persistent storage (files will be lost on
+    restart in that case).
+    """
+    if os.path.isdir(VOLUME_ROOT) and os.path.ismount(VOLUME_ROOT):
+        lora_dir = os.path.join(VOLUME_ROOT, "models", "loras")
+    else:
+        # Fallback to local directory inside container
+        lora_dir = "/app/models/loras"
+        logger.warning("Network volume not mounted, using local path: %s", lora_dir)
+    os.makedirs(lora_dir, exist_ok=True)
+    return lora_dir
 
 # ---------------------------------------------------------------------------
 # Supported model registry
@@ -150,8 +170,9 @@ HARDCODED_LORAS = {
 
 def ensure_loras_downloaded() -> None:
     """
-    Download the hardcoded CivitAI LoRAs into LORAS_DIR if they are not
-    already present.
+    Download the hardcoded CivitAI LoRAs into the LoRA directory if they are
+    not already present.  The directory is resolved via :func:`get_lora_dir`
+    so the correct path is used whether or not the network volume is mounted.
 
     Reads ``CIVITAI_API_TOKEN`` from the environment.  If the token is
     missing or a download fails the function logs a warning and continues
@@ -165,10 +186,10 @@ def ensure_loras_downloaded() -> None:
             "CIVITAI_API_TOKEN is not set — hardcoded LoRAs will not be downloaded"
         )
 
-    os.makedirs(LORAS_DIR, exist_ok=True)
+    loras_dir = get_lora_dir()
 
     for ui_name, info in HARDCODED_LORAS.items():
-        dest_path = os.path.join(LORAS_DIR, info["filename"])
+        dest_path = os.path.join(loras_dir, info["filename"])
         if os.path.isfile(dest_path):
             logger.info(
                 "LoRA '%s' already exists at '%s' — skipping download",
@@ -509,25 +530,27 @@ class ModelManager:
         return baked_path
 
     def _resolve_lora_path(self, lora_name: str) -> str:
+        loras_dir = get_lora_dir()
+
         # Check if it's a real UI name from HARDCODED_LORAS
         if lora_name in HARDCODED_LORAS:
             info = HARDCODED_LORAS[lora_name]
-            lora_path = os.path.join(LORAS_DIR, info["filename"])
+            lora_path = os.path.join(loras_dir, info["filename"])
             if os.path.isfile(lora_path):
                 return lora_path
             raise FileNotFoundError(
                 f"Hardcoded LoRA '{lora_name}' has not been downloaded yet. "
                 f"Run ensure_loras_downloaded() at startup."
             )
-        
+
         # Try exact filename first, then with .safetensors extension
         for candidate in [lora_name, f"{lora_name}.safetensors"]:
-            path = os.path.join(LORAS_DIR, candidate)
+            path = os.path.join(loras_dir, candidate)
             if os.path.isfile(path):
                 return path
-                
+
         raise FileNotFoundError(
-            f"LoRA '{lora_name}' not found in '{LORAS_DIR}'"
+            f"LoRA '{lora_name}' not found in '{loras_dir}'"
         )
 
     # ------------------------------------------------------------------
