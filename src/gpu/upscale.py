@@ -54,6 +54,7 @@ from typing import Any, Optional
 import modal
 
 from src.app_config import app, upscale_image, lora_volume, models_volume
+from src.services.model_metadata import ModelMetadataManager, ModelInfo
 from src.services.model_registry import (
     LORAS_MOUNT_PATH,
     MODELS_MOUNT_PATH,
@@ -75,25 +76,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # LoRA volume mount point (must match the volumes= dict in @app.cls)
-LORAS_DIR = LORAS_MOUNT_PATH  # /vol/loras
-
-# ---------------------------------------------------------------------------
-# Hardcoded CivitAI LoRAs — metadata only; files are downloaded via the UI
-# wizard / download service, NOT at container startup.
-# ---------------------------------------------------------------------------
-
-HARDCODED_LORAS: dict[str, dict[str, Any]] = {
-    "Aesthetic Quality": {
-        "civitai_model_id": 929497,
-        "filename": "lora_929497.safetensors",
-        "trigger_words": ["masterpiece", "best quality", "very aesthetic"],
-    },
-    "Detailer IL": {
-        "civitai_model_id": 1231943,
-        "filename": "lora_1231943.safetensors",
-        "trigger_words": ["Jeddtl02"],
-    },
-}
+LORAS_DIR = LORAS_MOUNT_PATH          # /vol/loras  — base volume path
+LORAS_SUBDIR = os.path.join(LORAS_MOUNT_PATH, "loras")  # /vol/loras/loras — new subdirectory
 
 # ---------------------------------------------------------------------------
 # UpscaleService
@@ -414,7 +398,7 @@ class UpscaleService:
         )
 
         # Inject trigger words for active LoRAs into the global prompt
-        global_prompt = _inject_trigger_words(global_prompt, loras)
+        global_prompt = _inject_trigger_words(global_prompt, loras, LORAS_DIR)
 
         # Apply LoRAs
         lora_volume.reload()
@@ -605,7 +589,7 @@ class UpscaleService:
         )
 
         # Inject trigger words for active LoRAs into the global prompt
-        global_prompt = _inject_trigger_words(global_prompt, loras)
+        global_prompt = _inject_trigger_words(global_prompt, loras, LORAS_DIR)
 
         # Load source image
         source_image = _bytes_to_pil(source_image_bytes)
@@ -737,37 +721,60 @@ class UpscaleService:
     # ------------------------------------------------------------------
 
     @modal.method()
-    def list_models(self) -> list[dict]:
-        """
-        List LoRA files available on the volume.
+    def list_models(self) -> dict:
+        """List available LoRAs and checkpoints with metadata.
 
         Returns
         -------
-        list[dict]
-            Each dict has keys ``"name"``, ``"path"``, ``"size_mb"``.
+        dict
+            ``{"models": list[dict]}`` where each dict has keys
+            ``"filename"``, ``"name"``, ``"model_type"``, ``"trigger_words"``,
+            ``"base_model"``, ``"default_weight"``, ``"civitai_model_id"``.
         """
-        lora_volume.reload()
-        os.makedirs(LORAS_DIR, exist_ok=True)
+        from src.app_config import lora_volume as _lv
+        _lv.reload()
 
-        logger.info("Listing LoRAs in '%s'", LORAS_DIR)
+        mgr = ModelMetadataManager(LORAS_DIR)
+        models = mgr.list_models()
 
-        models: list[dict] = []
-        try:
-            for entry in sorted(os.scandir(LORAS_DIR), key=lambda e: e.name):
-                if not entry.is_file():
+        result: list[dict] = []
+        known_files: set[str] = {m.filename for m in models}
+
+        # Models with metadata
+        for m in models:
+            result.append({
+                "filename": m.filename,
+                "name": m.name,
+                "model_type": m.model_type,
+                "trigger_words": m.trigger_words,
+                "base_model": m.base_model,
+                "default_weight": m.default_weight,
+                "civitai_model_id": m.civitai_model_id,
+            })
+
+        # Scan for orphan files (no metadata entry)
+        for scan_dir in [LORAS_SUBDIR, LORAS_DIR]:
+            if not os.path.isdir(scan_dir):
+                continue
+            for fname in os.listdir(scan_dir):
+                if fname.startswith(".") or fname in known_files:
                     continue
-                size_bytes = entry.stat().st_size
-                size_mb = round(size_bytes / (1024 * 1024), 2)
-                models.append({
-                    "name": entry.name,
-                    "path": entry.path,
-                    "size_mb": size_mb,
-                })
-        except FileNotFoundError:
-            logger.warning("LoRA directory '%s' does not exist yet", LORAS_DIR)
+                if not fname.endswith((".safetensors", ".ckpt", ".pt")):
+                    continue
+                if os.path.isfile(os.path.join(scan_dir, fname)):
+                    result.append({
+                        "filename": fname,
+                        "name": fname.rsplit(".", 1)[0],
+                        "model_type": "lora",
+                        "trigger_words": [],
+                        "base_model": "",
+                        "default_weight": 1.0,
+                        "civitai_model_id": None,
+                    })
+                    known_files.add(fname)
 
-        logger.info("Found %d LoRA(s)", len(models))
-        return models
+        logger.info("list_models: returning %d model(s)", len(result))
+        return {"models": result}
 
     @modal.method()
     def upload_model(
@@ -820,8 +827,8 @@ class UpscaleService:
                 f"File extension '{ext}' not allowed. Allowed: {ALLOWED_EXTENSIONS}"
             )
 
-        os.makedirs(LORAS_DIR, exist_ok=True)
-        dest_path = os.path.join(LORAS_DIR, safe_filename)
+        os.makedirs(LORAS_SUBDIR, exist_ok=True)
+        dest_path = os.path.join(LORAS_SUBDIR, safe_filename)
 
         write_mode = "ab" if append else "wb"
         logger.info(
@@ -836,6 +843,20 @@ class UpscaleService:
             fh.write(file_data)
 
         size_mb = round(os.path.getsize(dest_path) / (1024 * 1024), 2)
+
+        # Add a basic metadata entry if this is a new file (not a chunk append)
+        if not append:
+            mgr = ModelMetadataManager(LORAS_DIR)
+            if mgr.get_model(safe_filename) is None:
+                display_name = safe_filename.rsplit(".", 1)[0]
+                mgr.add_model(ModelInfo(
+                    filename=safe_filename,
+                    model_type="lora",
+                    name=display_name,
+                    size_bytes=os.path.getsize(dest_path),
+                ))
+                logger.info("Created metadata entry for '%s'", safe_filename)
+
         lora_volume.commit()
         logger.info("Upload complete: '%s' (%.2f MB)", safe_filename, size_mb)
 
@@ -870,30 +891,43 @@ class UpscaleService:
         if not safe_filename:
             raise ValueError(f"Invalid filename '{filename}'")
 
-        abs_path = os.path.join(LORAS_DIR, safe_filename)
+        # Candidate paths: subdirectory first, then legacy flat path
+        subdir_path = os.path.join(LORAS_SUBDIR, safe_filename)
+        flat_path = os.path.join(LORAS_DIR, safe_filename)
 
-        # Prevent path traversal
-        if not os.path.normpath(abs_path).startswith(
-            os.path.normpath(LORAS_DIR) + os.sep
-        ):
-            raise ValueError(
-                f"Path '{abs_path}' is outside the allowed LoRA directory '{LORAS_DIR}'"
+        # Prevent path traversal for both candidates
+        norm_base = os.path.normpath(LORAS_DIR)
+        for candidate in (subdir_path, flat_path):
+            if not os.path.normpath(candidate).startswith(norm_base):
+                raise ValueError(
+                    f"Path '{candidate}' is outside the allowed LoRA directory '{LORAS_DIR}'"
+                )
+
+        deleted_path: Optional[str] = None
+        for candidate in (subdir_path, flat_path):
+            if os.path.exists(candidate):
+                logger.info("Deleting '%s'", candidate)
+                if os.path.isfile(candidate):
+                    os.remove(candidate)
+                else:
+                    shutil.rmtree(candidate)
+                deleted_path = candidate
+                break
+
+        if deleted_path is None:
+            raise FileNotFoundError(
+                f"LoRA not found: '{safe_filename}' (checked '{subdir_path}' and '{flat_path}')"
             )
 
-        if not os.path.exists(abs_path):
-            raise FileNotFoundError(f"LoRA not found: '{abs_path}'")
-
-        logger.info("Deleting '%s'", abs_path)
-
-        if os.path.isfile(abs_path):
-            os.remove(abs_path)
-        else:
-            shutil.rmtree(abs_path)
+        # Remove metadata entry
+        mgr = ModelMetadataManager(LORAS_DIR)
+        if mgr.remove_model(safe_filename):
+            logger.info("Removed metadata entry for '%s'", safe_filename)
 
         lora_volume.commit()
-        logger.info("Deleted '%s'", abs_path)
+        logger.info("Deleted '%s'", deleted_path)
 
-        return {"status": "deleted", "path": abs_path}
+        return {"status": "deleted", "path": deleted_path}
 
     @modal.method()
     def health(self) -> dict:
@@ -1029,20 +1063,42 @@ def _pil_to_bytes(image, fmt: str = "PNG") -> bytes:
     return result
 
 
-def _inject_trigger_words(global_prompt: str, loras: list[dict]) -> str:
-    """Inject LoRA trigger words into the global prompt if not already present."""
-    injected: list[str] = []
-    for lora in loras:
-        lora_name = lora.get("name", "")
-        lora_info = HARDCODED_LORAS.get(lora_name, {})
-        for trigger in lora_info.get("trigger_words", []):
-            if trigger and trigger not in global_prompt and trigger not in injected:
-                injected.append(trigger)
-    if injected:
-        trigger_text = ", ".join(injected)
-        global_prompt = f"{trigger_text}, {global_prompt}" if global_prompt else trigger_text
-        logger.info("Injected trigger words into prompt: %s", injected)
-    return global_prompt
+def _inject_trigger_words(prompt: str, lora_names: list[dict], loras_dir: str) -> str:
+    """Inject trigger words from metadata into the prompt.
+
+    Parameters
+    ----------
+    prompt:
+        The current positive prompt string.
+    lora_names:
+        List of LoRA dicts (each with at least a ``"filename"`` key).
+    loras_dir:
+        Base volume path used to locate the ``.metadata.json`` file.
+
+    Returns
+    -------
+    str
+        The prompt with any missing trigger words prepended.
+    """
+    mgr = ModelMetadataManager(loras_dir)
+    triggers: list[str] = []
+    for lora in lora_names:
+        filename = lora.get("filename", "")
+        if not filename:
+            continue
+        info = mgr.get_model(filename)
+        if info and info.trigger_words:
+            for tw in info.trigger_words:
+                if tw and tw not in triggers:
+                    triggers.append(tw)
+
+    if triggers:
+        trigger_str = ", ".join(triggers)
+        if trigger_str.lower() not in prompt.lower():
+            prompt = f"{trigger_str}, {prompt}" if prompt else trigger_str
+            logger.info("Injected trigger words into prompt: %s", triggers)
+
+    return prompt
 
 
 def _apply_loras(pipe: Any, loras: list[dict], loras_dir: str) -> list[str]:
@@ -1053,9 +1109,11 @@ def _apply_loras(pipe: Any, loras: list[dict], loras_dir: str) -> list[str]:
     pipe:
         The loaded diffusers pipeline.
     loras:
-        List of dicts with keys ``"name"`` (str) and ``"weight"`` (float).
+        List of dicts with keys ``"filename"`` (str, preferred) or ``"name"``
+        (str, legacy) and ``"weight"`` (float).
     loras_dir:
-        Directory where LoRA ``.safetensors`` files are stored.
+        Base volume path where LoRA ``.safetensors`` files are stored.
+        Files are looked up in ``LORAS_SUBDIR`` first, then ``loras_dir``.
 
     Returns
     -------
@@ -1068,32 +1126,41 @@ def _apply_loras(pipe: Any, loras: list[dict], loras_dir: str) -> list[str]:
 
     for lora in loras:
         name: str = lora.get("name", "")
+        filename: str = lora.get("filename", "")
         weight: float = float(lora.get("weight", 1.0))
-        if not name:
+        if not name and not filename:
             continue
 
-        # Resolve path — check HARDCODED_LORAS first, then raw filename
-        if name in HARDCODED_LORAS:
-            info = HARDCODED_LORAS[name]
-            lora_path = os.path.join(loras_dir, info["filename"])
-        else:
-            safe_name = os.path.basename(name)
-            lora_path = os.path.join(loras_dir, safe_name)
-            if not os.path.isfile(lora_path):
-                lora_path = os.path.join(loras_dir, f"{safe_name}.safetensors")
+        # Determine the bare filename to look up
+        safe_name = os.path.basename(filename) if filename else os.path.basename(name)
+        # Use a stable adapter_name for diffusers (prefer display name, fall back to filename)
+        adapter_name: str = name or safe_name
+
+        # Look in loras/ subdirectory first, then fall back to legacy flat path
+        lora_path = os.path.join(LORAS_SUBDIR, safe_name)
+        if not os.path.exists(lora_path):
+            lora_path = os.path.join(loras_dir, safe_name)  # Legacy flat path
+        if not os.path.exists(lora_path):
+            # Last-resort: try appending .safetensors if no extension
+            if not os.path.splitext(safe_name)[1]:
+                for candidate_dir in (LORAS_SUBDIR, loras_dir):
+                    candidate = os.path.join(candidate_dir, f"{safe_name}.safetensors")
+                    if os.path.exists(candidate):
+                        lora_path = candidate
+                        break
 
         if not os.path.isfile(lora_path):
-            logger.warning("Skipping LoRA '%s' — file not found at '%s'", name, lora_path)
+            logger.warning("Skipping LoRA '%s' — file not found at '%s'", adapter_name, lora_path)
             continue
 
-        logger.info("Loading LoRA '%s' (weight=%.2f) from '%s'", name, weight, lora_path)
+        logger.info("Loading LoRA '%s' (weight=%.2f) from '%s'", adapter_name, weight, lora_path)
         try:
-            pipe.load_lora_weights(lora_path, adapter_name=name)
-            adapter_names.append(name)
+            pipe.load_lora_weights(lora_path, adapter_name=adapter_name)
+            adapter_names.append(adapter_name)
             adapter_weights.append(weight)
         except Exception as e:  # pylint: disable=broad-except
-            logger.warning("Failed to load LoRA '%s': %s — skipping", name, e)
-            failed_adapters.append(name)
+            logger.warning("Failed to load LoRA '%s': %s — skipping", adapter_name, e)
+            failed_adapters.append(adapter_name)
             continue
 
     # Filter out any failed adapters before activating

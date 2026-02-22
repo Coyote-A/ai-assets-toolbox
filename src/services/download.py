@@ -15,8 +15,11 @@ import shutil
 from datetime import datetime, timezone
 
 import modal
+import requests
 
 from src.app_config import app, download_image, lora_volume, models_volume
+from src.services.civitai import CivitAIModelInfo, fetch_model_info, parse_civitai_input
+from src.services.model_metadata import ModelInfo, ModelMetadataManager
 from src.services.model_registry import (
     ALL_MODELS,
     LORAS_MOUNT_PATH,
@@ -348,9 +351,11 @@ class DownloadService:
         The file is saved as ``{LORAS_MOUNT_PATH}/lora_{civitai_model_id}.safetensors``.
 
         Returns ``{"status": "completed"|"error", ...}``.
-        """
-        import requests  # type: ignore[import]
 
+        .. deprecated::
+            Use :meth:`download_civitai_model` instead, which supports full
+            metadata integration, checkpoints, and flexible URL/ID input.
+        """
         lora_volume.reload()
 
         dest_filename = f"lora_{civitai_model_id}.safetensors"
@@ -386,3 +391,305 @@ class DownloadService:
         lora_volume.commit()
         logger.info("LoRA %d downloaded successfully to %s.", civitai_model_id, dest_path)
         return {"status": "completed", "path": dest_path}
+
+    # ------------------------------------------------------------------
+    # CivitAI model download (Phase 2)
+    # ------------------------------------------------------------------
+
+    @modal.method()
+    def download_civitai_model(self, user_input: str, civitai_token: str | None = None) -> dict:
+        """
+        Download a model from CivitAI by URL, model ID, or version ID.
+
+        Steps:
+
+        1. Parse user input to get model_id/version_id
+        2. Fetch metadata from CivitAI API
+        3. Download the file to the appropriate subdirectory
+        4. Save metadata to .metadata.json
+        5. Return the model info
+
+        Returns: ``{"success": bool, "model_info": dict | None, "error": str | None}``
+        """
+        from src.app_config import lora_volume  # noqa: F811 — re-import for clarity inside method
+
+        # Step 1: Parse input
+        model_id, version_id = parse_civitai_input(user_input)
+        if model_id is None and version_id is None:
+            return {"success": False, "model_info": None, "error": f"Could not parse input: {user_input}"}
+
+        # Step 2: Fetch metadata
+        logger.info("Fetching CivitAI metadata for model=%s version=%s", model_id, version_id)
+        civitai_info = fetch_model_info(model_id, version_id, civitai_token)
+        if civitai_info is None:
+            return {"success": False, "model_info": None, "error": "Failed to fetch model info from CivitAI"}
+
+        # Step 3: Determine target path
+        # LoRAs go to /vol/loras/loras/, checkpoints to /vol/loras/checkpoints/
+        if civitai_info.model_type == "checkpoint":
+            subdir = os.path.join(LORAS_MOUNT_PATH, "checkpoints")
+        else:
+            subdir = os.path.join(LORAS_MOUNT_PATH, "loras")
+        os.makedirs(subdir, exist_ok=True)
+
+        target_path = os.path.join(subdir, civitai_info.filename)
+
+        # Check if already exists
+        if os.path.exists(target_path):
+            logger.info("File already exists: %s", target_path)
+            # Still update metadata in case it was missing
+            self._save_civitai_metadata(civitai_info)
+            lora_volume.commit()
+            return {
+                "success": True,
+                "model_info": self._civitai_to_dict(civitai_info),
+                "error": None,
+                "already_existed": True,
+            }
+
+        # Step 4: Download
+        logger.info("Downloading %s (%s) to %s", civitai_info.name, civitai_info.filename, target_path)
+        partial_path = target_path + ".partial"
+
+        try:
+            headers: dict[str, str] = {}
+            if civitai_token:
+                headers["Authorization"] = f"Bearer {civitai_token}"
+
+            resp = requests.get(civitai_info.download_url, headers=headers, stream=True, timeout=600)
+            resp.raise_for_status()
+
+            with open(partial_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8 * 1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+
+            # Atomic rename
+            os.replace(partial_path, target_path)
+            logger.info("Download complete: %s", target_path)
+
+        except Exception as e:  # noqa: BLE001
+            # Cleanup partial
+            if os.path.exists(partial_path):
+                os.remove(partial_path)
+            logger.error("Download failed: %s", e)
+            return {"success": False, "model_info": None, "error": str(e)}
+
+        # Step 5: Save metadata
+        self._save_civitai_metadata(civitai_info)
+
+        lora_volume.commit()
+
+        return {
+            "success": True,
+            "model_info": self._civitai_to_dict(civitai_info),
+            "error": None,
+            "already_existed": False,
+        }
+
+    def _save_civitai_metadata(self, civitai_info: CivitAIModelInfo) -> None:
+        """Save CivitAI model info to the metadata manager."""
+        mgr = ModelMetadataManager(LORAS_MOUNT_PATH)
+        model_info = ModelInfo(
+            filename=civitai_info.filename,
+            model_type=civitai_info.model_type,
+            name=civitai_info.name,
+            civitai_model_id=civitai_info.model_id,
+            civitai_version_id=civitai_info.version_id,
+            trigger_words=civitai_info.trigger_words,
+            description=civitai_info.description,
+            base_model=civitai_info.base_model,
+            default_weight=civitai_info.recommended_weight or 1.0,
+            tags=civitai_info.tags,
+            source_url=f"https://civitai.com/models/{civitai_info.model_id}",
+            size_bytes=civitai_info.size_bytes,
+        )
+        mgr.add_model(model_info)
+
+    @staticmethod
+    def _civitai_to_dict(info: CivitAIModelInfo) -> dict:
+        """Convert :class:`~src.services.civitai.CivitAIModelInfo` to a serializable dict."""
+        return {
+            "model_id": info.model_id,
+            "version_id": info.version_id,
+            "name": info.name,
+            "version_name": info.version_name,
+            "model_type": info.model_type,
+            "base_model": info.base_model,
+            "trigger_words": info.trigger_words,
+            "filename": info.filename,
+            "size_bytes": info.size_bytes,
+            "recommended_weight": info.recommended_weight,
+        }
+
+    @modal.method()
+    def fetch_civitai_info(self, user_input: str, civitai_token: str | None = None) -> dict:
+        """
+        Fetch CivitAI model info without downloading.
+
+        Useful for previewing model details in the UI before committing to a
+        download.
+
+        Returns: ``{"success": bool, "model_info": dict | None, "error": str | None}``
+        """
+        model_id, version_id = parse_civitai_input(user_input)
+        if model_id is None and version_id is None:
+            return {"success": False, "model_info": None, "error": f"Could not parse: {user_input}"}
+
+        info = fetch_model_info(model_id, version_id, civitai_token)
+        if info is None:
+            return {"success": False, "model_info": None, "error": "Failed to fetch from CivitAI API"}
+
+        return {"success": True, "model_info": self._civitai_to_dict(info), "error": None}
+
+    @modal.method()
+    def delete_user_model(self, filename: str, model_type: str = "lora") -> dict:
+        """
+        Delete a user model (LoRA or checkpoint) from the volume.
+
+        Returns: ``{"success": bool, "error": str | None}``
+        """
+        from src.app_config import lora_volume  # noqa: F811
+
+        if model_type == "checkpoint":
+            file_path = os.path.join(LORAS_MOUNT_PATH, "checkpoints", filename)
+        else:
+            file_path = os.path.join(LORAS_MOUNT_PATH, "loras", filename)
+
+        # Also check flat path (legacy)
+        flat_path = os.path.join(LORAS_MOUNT_PATH, filename)
+
+        deleted = False
+        for path in [file_path, flat_path]:
+            if os.path.exists(path):
+                os.remove(path)
+                logger.info("Deleted model file: %s", path)
+                deleted = True
+                break
+
+        # Remove metadata
+        mgr = ModelMetadataManager(LORAS_MOUNT_PATH)
+        mgr.remove_model(filename)
+
+        lora_volume.commit()
+
+        if not deleted:
+            return {"success": False, "error": f"File not found: {filename}"}
+        return {"success": True, "error": None}
+
+    @modal.method()
+    def list_user_models(self, model_type: str | None = None) -> list[dict]:
+        """
+        List all user models with metadata.
+
+        Scans both the metadata store and the filesystem so that files without
+        metadata entries (orphans) are also returned.
+
+        Returns a list of model info dicts.
+        """
+        from src.app_config import lora_volume  # noqa: F811
+        lora_volume.reload()
+
+        mgr = ModelMetadataManager(LORAS_MOUNT_PATH)
+        models = mgr.list_models(model_type)
+
+        # Also scan for files without metadata
+        result: list[dict] = []
+        known_files = {m.filename for m in models}
+
+        # Add models with metadata
+        for m in models:
+            d = {
+                "filename": m.filename,
+                "name": m.name,
+                "model_type": m.model_type,
+                "trigger_words": m.trigger_words,
+                "base_model": m.base_model,
+                "default_weight": m.default_weight,
+                "civitai_model_id": m.civitai_model_id,
+                "tags": m.tags,
+                "size_bytes": m.size_bytes,
+            }
+            result.append(d)
+
+        # Scan for orphan files (no metadata)
+        for subdir_name, mtype in [("loras", "lora"), ("checkpoints", "checkpoint"), ("", "lora")]:
+            scan_dir = os.path.join(LORAS_MOUNT_PATH, subdir_name) if subdir_name else LORAS_MOUNT_PATH
+            if not os.path.isdir(scan_dir):
+                continue
+            for fname in os.listdir(scan_dir):
+                if fname.startswith(".") or fname in known_files:
+                    continue
+                if not fname.endswith((".safetensors", ".ckpt", ".pt")):
+                    continue
+                if model_type and mtype != model_type:
+                    continue
+                # Orphan file — add with minimal metadata
+                fpath = os.path.join(scan_dir, fname)
+                result.append({
+                    "filename": fname,
+                    "name": fname.rsplit(".", 1)[0],
+                    "model_type": mtype,
+                    "trigger_words": [],
+                    "base_model": "",
+                    "default_weight": 1.0,
+                    "civitai_model_id": None,
+                    "tags": [],
+                    "size_bytes": os.path.getsize(fpath) if os.path.isfile(fpath) else 0,
+                })
+
+        return result
+
+    @modal.method()
+    def migrate_metadata(self) -> dict:
+        """
+        Run metadata migration from hardcoded LoRAs.
+
+        Also moves flat LoRA files (stored directly under ``LORAS_MOUNT_PATH``)
+        into the ``loras/`` subdirectory for the new layout.
+
+        Returns: ``{"migrated": int, "moved": int}``
+        """
+        from src.app_config import lora_volume  # noqa: F811
+        lora_volume.reload()
+
+        mgr = ModelMetadataManager(LORAS_MOUNT_PATH)
+
+        # Migrate hardcoded LoRAs (from upscale.py's HARDCODED_LORAS format)
+        hardcoded = {
+            "Aesthetic Quality": {
+                "filename": "lora_929497.safetensors",
+                "civitai_id": 929497,
+                "trigger": "",
+                "weight": 1.0,
+                "base_model": "Illustrious",
+            },
+            "Detailer IL": {
+                "filename": "lora_1231943.safetensors",
+                "civitai_id": 1231943,
+                "trigger": "",
+                "weight": 1.0,
+                "base_model": "Illustrious",
+            },
+        }
+        migrated = mgr.migrate_from_hardcoded(hardcoded)
+
+        # Move flat files into loras/ subdirectory
+        loras_subdir = os.path.join(LORAS_MOUNT_PATH, "loras")
+        os.makedirs(loras_subdir, exist_ok=True)
+
+        moved = 0
+        for fname in os.listdir(LORAS_MOUNT_PATH):
+            if fname.startswith(".") or not fname.endswith((".safetensors", ".ckpt", ".pt")):
+                continue
+            src_path = os.path.join(LORAS_MOUNT_PATH, fname)
+            if not os.path.isfile(src_path):
+                continue
+            dst_path = os.path.join(loras_subdir, fname)
+            if not os.path.exists(dst_path):
+                shutil.move(src_path, dst_path)
+                logger.info("Moved %s -> loras/%s", fname, fname)
+                moved += 1
+
+        lora_volume.commit()
+        return {"migrated": migrated, "moved": moved}
