@@ -136,18 +136,15 @@ HARDCODED_LORAS = {
     "Aesthetic Quality": {
         "model_id": "929497",
         "version_id": "2247497",
-        "filename": "lora_929497.safetensors"
-    },
-    "Character Design": {
-        "model_id": "100435",
-        "version_id": "1096293",
-        "filename": "lora_100435.safetensors"
+        "filename": "lora_929497.safetensors",
+        "trigger_words": ["masterpiece", "best quality", "very aesthetic"],
     },
     "Detailer IL": {
         "model_id": "1231943",
         "version_id": "1736373",
-        "filename": "lora_1231943.safetensors"
-    }
+        "filename": "lora_1231943.safetensors",
+        "trigger_words": ["Jeddtl02"],
+    },
 }
 
 

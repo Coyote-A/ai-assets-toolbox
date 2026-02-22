@@ -18,7 +18,7 @@ full_image_b64_state : str         — base64 JPEG of the full upscaled image fo
 
 LoRAs
 -----
-Three CivitAI LoRAs are hardcoded and automatically included in every upscale request
+Two CivitAI LoRAs are hardcoded and automatically included in every upscale request
 with weight 1.0.  They are downloaded at container startup by ensure_loras_downloaded().
 """
 from __future__ import annotations
@@ -91,7 +91,6 @@ ACTIVE_MODEL = "illustrious-xl"
 # Hardcoded LoRAs — automatically included in every upscale request
 HARDCODED_LORAS = [
     {"name": "Aesthetic Quality", "model_id": "929497", "version_id": "2247497", "default_weight": 1.0},
-    {"name": "Character Design", "model_id": "100435", "version_id": "1096293", "default_weight": 1.0},
     {"name": "Detailer IL", "model_id": "1231943", "version_id": "1736373", "default_weight": 1.0},
 ]
 
@@ -901,6 +900,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
                             precision=0,
                             scale=1,
                             info="Size of each square tile. 1024 recommended for SDXL.",
+                            elem_id="upscale_tile_size",
                         )
                         overlap_num = gr.Number(
                             value=config.DEFAULT_OVERLAP,
@@ -908,6 +908,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
                             precision=0,
                             scale=1,
                             info="Pixel overlap between adjacent tiles for seamless blending.",
+                            elem_id="upscale_overlap",
                         )
                     gen_res_dd = gr.Dropdown(
                         choices=_GEN_RES_LABELS,
@@ -919,6 +920,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
                             "The tile grid stays at the grid resolution; only individual tiles are upscaled "
                             "for generation then downscaled back."
                         ),
+                        elem_id="upscale_gen_res",
                     )
 
                 # ---- 🎨 Generation Settings ----
@@ -928,12 +930,14 @@ def create_upscale_tab(client: RunPodClient) -> None:
                         placeholder="masterpiece, best quality, highly detailed, sharp focus",
                         lines=2,
                         info="Applied to all tiles unless a tile-specific prompt is set.",
+                        elem_id="upscale_global_prompt",
                     )
                     negative_prompt = gr.Textbox(
                         label="Negative Prompt",
                         placeholder="blurry, low quality, artifacts, watermark, jpeg artifacts",
                         lines=2,
                         info="Concepts to suppress. Applied to all tiles.",
+                        elem_id="upscale_negative_prompt",
                     )
                     with gr.Row():
                         strength_sl = gr.Slider(
@@ -941,12 +945,14 @@ def create_upscale_tab(client: RunPodClient) -> None:
                             label="Denoise Strength",
                             info="How much to change the tile. 0.3–0.5 recommended.",
                             scale=1,
+                            elem_id="upscale_strength",
                         )
                         steps_sl = gr.Slider(
                             1, 100, value=30, step=1,
                             label="Steps",
                             info="Diffusion steps. 20–40 is a good range.",
                             scale=1,
+                            elem_id="upscale_steps",
                         )
                     with gr.Row():
                         cfg_sl = gr.Slider(
@@ -954,6 +960,7 @@ def create_upscale_tab(client: RunPodClient) -> None:
                             label="CFG Scale",
                             info="Prompt adherence. 6–8 recommended.",
                             scale=1,
+                            elem_id="upscale_cfg_scale",
                         )
                         seed_num = gr.Number(
                             value=-1,
@@ -971,24 +978,13 @@ def create_upscale_tab(client: RunPodClient) -> None:
                             label="Aesthetic Quality",
                             info="Enhances image quality with 'masterpiece' and 'best quality' effects.",
                             scale=2,
+                            elem_id="upscale_lora_aesthetic_enabled",
                         )
                         lora_aesthetic_weight = gr.Slider(
                             0.0, 2.0, value=1.0, step=0.1,
                             label="Weight",
                             scale=1,
-                        )
-                    # Character Design
-                    with gr.Row():
-                        lora_character_enabled = gr.Checkbox(
-                            value=True,
-                            label="Character Design",
-                            info="For character design sheets with color palette support.",
-                            scale=2,
-                        )
-                        lora_character_weight = gr.Slider(
-                            0.0, 2.0, value=1.0, step=0.1,
-                            label="Weight",
-                            scale=1,
+                            elem_id="upscale_lora_aesthetic_weight",
                         )
                     # Detailer IL
                     with gr.Row():
@@ -997,26 +993,14 @@ def create_upscale_tab(client: RunPodClient) -> None:
                             label="Detailer IL",
                             info="Improves image details and enhancement.",
                             scale=2,
+                            elem_id="upscale_lora_detailer_enabled",
                         )
                         lora_detailer_weight = gr.Slider(
                             0.0, 2.0, value=1.0, step=0.1,
                             label="Weight",
                             scale=1,
+                            elem_id="upscale_lora_detailer_weight",
                         )
-
-                # ---- 🎨 CivitAI Model Information ----
-                with gr.Accordion("🎨 CivitAI Model Information", open=False):
-                    gr.Markdown("### Active LoRAs")
-                    gr.Markdown("""
-                    **Aesthetic Quality** (929497): Enhances image quality with 'masterpiece' and 'best quality' effects.  
-                    Trigger words: `masterpiece`, `best quality`, `very aesthetic`
-
-                    **Detailer IL** (1231943): Improves image details and enhancement.  
-                    Trigger words: `Jeddtl02`
-
-                    **Character Design** (100435): NOT displayed in upscale tab (helper model).  
-                    For character design sheets with color palette support.
-                    """)
 
                 # ---- 🔧 ControlNet ----
                 with gr.Accordion("🔧 ControlNet", open=False):
@@ -1190,7 +1174,6 @@ def create_upscale_tab(client: RunPodClient) -> None:
             full_b64,
             # LoRA states
             lora_aesthetic_enabled, lora_aesthetic_weight,
-            lora_character_enabled, lora_character_weight,
             lora_detailer_enabled, lora_detailer_weight,
         ):
             """Upscale all tiles and return updated grid HTML + assembled result.
@@ -1207,7 +1190,6 @@ def create_upscale_tab(client: RunPodClient) -> None:
             # Collect LoRA states
             lora_states = [
                 {"enabled": lora_aesthetic_enabled, "weight": lora_aesthetic_weight},
-                {"enabled": lora_character_enabled, "weight": lora_character_weight},
                 {"enabled": lora_detailer_enabled, "weight": lora_detailer_weight},
             ]
 
@@ -1346,7 +1328,6 @@ def create_upscale_tab(client: RunPodClient) -> None:
                 gen_res_dd,
                 full_image_b64_state,
                 lora_aesthetic_enabled, lora_aesthetic_weight,
-                lora_character_enabled, lora_character_weight,
                 lora_detailer_enabled, lora_detailer_weight,
             ],
             outputs=[tiles_state, tile_grid_html, result_image, status_text],
@@ -1366,7 +1347,6 @@ def create_upscale_tab(client: RunPodClient) -> None:
             full_b64,
             # LoRA states
             lora_aesthetic_enabled, lora_aesthetic_weight,
-            lora_character_enabled, lora_character_weight,
             lora_detailer_enabled, lora_detailer_weight,
         ):
             """Upscale only the currently selected tile."""
@@ -1378,7 +1358,6 @@ def create_upscale_tab(client: RunPodClient) -> None:
             # Collect LoRA states
             lora_states = [
                 {"enabled": lora_aesthetic_enabled, "weight": lora_aesthetic_weight},
-                {"enabled": lora_character_enabled, "weight": lora_character_weight},
                 {"enabled": lora_detailer_enabled, "weight": lora_detailer_weight},
             ]
             
@@ -1413,7 +1392,6 @@ def create_upscale_tab(client: RunPodClient) -> None:
                 gen_res_dd,
                 full_image_b64_state,
                 lora_aesthetic_enabled, lora_aesthetic_weight,
-                lora_character_enabled, lora_character_weight,
                 lora_detailer_enabled, lora_detailer_weight,
             ],
             outputs=[tiles_state, tile_grid_html, tile_proc_preview, result_image, status_text],
@@ -1478,3 +1456,140 @@ def create_upscale_tab(client: RunPodClient) -> None:
             inputs=[result_image],
             outputs=[image_input],
         )
+
+        # ----------------------------------------------------------------
+        # localStorage persistence — saves/restores settings across page refreshes
+        # ----------------------------------------------------------------
+        _LOCALSTORAGE_SCRIPT = """
+<script>
+(function() {
+    var SETTINGS_KEY = 'ai_assets_toolbox_settings';
+
+    // Helper: get the input element inside a Gradio component by elem_id
+    function getInput(elemId) {
+        var el = document.getElementById(elemId);
+        if (!el) return null;
+        // Gradio wraps inputs; find textarea or input inside
+        return el.querySelector('textarea') || el.querySelector('input[type="number"]') || el.querySelector('input[type="range"]') || el.querySelector('input[type="checkbox"]') || el.querySelector('input');
+    }
+
+    // Helper: set a value and fire the React/Svelte change event Gradio listens to
+    function setValue(elemId, value) {
+        var el = document.getElementById(elemId);
+        if (!el) return;
+        var input = el.querySelector('textarea') || el.querySelector('input[type="number"]') || el.querySelector('input[type="range"]') || el.querySelector('input[type="checkbox"]') || el.querySelector('input');
+        if (!input) return;
+        if (input.type === 'checkbox') {
+            if (input.checked !== value) {
+                input.checked = value;
+                input.dispatchEvent(new Event('change', {bubbles: true}));
+            }
+        } else {
+            var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value') ||
+                               Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
+            if (nativeSetter && nativeSetter.set) {
+                nativeSetter.set.call(input, value);
+            } else {
+                input.value = value;
+            }
+            input.dispatchEvent(new Event('input', {bubbles: true}));
+            input.dispatchEvent(new Event('change', {bubbles: true}));
+        }
+    }
+
+    // Settings fields: [elemId, type]
+    var FIELDS = [
+        ['upscale_global_prompt',          'text'],
+        ['upscale_negative_prompt',        'text'],
+        ['upscale_strength',               'number'],
+        ['upscale_steps',                  'number'],
+        ['upscale_cfg_scale',              'number'],
+        ['upscale_tile_size',              'number'],
+        ['upscale_overlap',                'number'],
+        ['upscale_gen_res',                'dropdown'],
+        ['upscale_lora_aesthetic_enabled', 'checkbox'],
+        ['upscale_lora_aesthetic_weight',  'number'],
+        ['upscale_lora_detailer_enabled',  'checkbox'],
+        ['upscale_lora_detailer_weight',   'number'],
+    ];
+
+    // Save current settings to localStorage
+    function saveSettings() {
+        var settings = {};
+        FIELDS.forEach(function(f) {
+            var elemId = f[0], type = f[1];
+            var el = document.getElementById(elemId);
+            if (!el) return;
+            if (type === 'dropdown') {
+                var sel = el.querySelector('input') || el.querySelector('select');
+                if (sel) settings[elemId] = sel.value;
+            } else if (type === 'checkbox') {
+                var cb = el.querySelector('input[type="checkbox"]');
+                if (cb) settings[elemId] = cb.checked;
+            } else {
+                var inp = el.querySelector('textarea') || el.querySelector('input');
+                if (inp) settings[elemId] = inp.value;
+            }
+        });
+        try {
+            localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+        } catch(e) {}
+    }
+
+    // Restore settings from localStorage
+    function restoreSettings() {
+        var saved;
+        try {
+            saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+        } catch(e) { saved = {}; }
+        if (!saved || Object.keys(saved).length === 0) return;
+
+        FIELDS.forEach(function(f) {
+            var elemId = f[0], type = f[1];
+            if (!(elemId in saved)) return;
+            setValue(elemId, saved[elemId]);
+        });
+    }
+
+    // Attach change listeners to save on every change
+    function attachListeners() {
+        FIELDS.forEach(function(f) {
+            var elemId = f[0], type = f[1];
+            var el = document.getElementById(elemId);
+            if (!el) return;
+            var input = el.querySelector('textarea') || el.querySelector('input[type="checkbox"]') || el.querySelector('input[type="number"]') || el.querySelector('input[type="range"]') || el.querySelector('input');
+            if (!input) return;
+            input.addEventListener('change', saveSettings);
+            input.addEventListener('input', saveSettings);
+        });
+    }
+
+    // Wait for Gradio to finish rendering, then restore + attach listeners
+    function init() {
+        restoreSettings();
+        attachListeners();
+    }
+
+    // Gradio renders asynchronously; retry a few times to ensure components exist
+    var attempts = 0;
+    function tryInit() {
+        attempts++;
+        var allFound = FIELDS.every(function(f) {
+            return !!document.getElementById(f[0]);
+        });
+        if (allFound || attempts >= 20) {
+            init();
+        } else {
+            setTimeout(tryInit, 300);
+        }
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function() { setTimeout(tryInit, 500); });
+    } else {
+        setTimeout(tryInit, 500);
+    }
+})();
+</script>
+"""
+        gr.HTML(value=_LOCALSTORAGE_SCRIPT, visible=True)

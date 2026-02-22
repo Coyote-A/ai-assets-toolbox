@@ -65,7 +65,7 @@ import logging
 import random
 from typing import Any, Optional
 
-from model_manager import ModelManager
+from model_manager import ModelManager, HARDCODED_LORAS
 from utils.image_utils import b64_to_pil, pil_to_b64
 from pipelines.sdxl_pipeline import _build_compel, _encode_prompt_with_compel
 
@@ -153,6 +153,22 @@ def handle_upscale_regions(job_input: dict[str, Any]) -> dict[str, Any]:
         ip_adapter_enabled,
         f"{target_width}x{target_height}" if target_width and target_height else "from_image",
     )
+
+    # ------------------------------------------------------------------
+    # Inject trigger words for active LoRAs into the global prompt
+    # (backend-side injection as a safety net; frontend also injects them)
+    # ------------------------------------------------------------------
+    injected_triggers: list[str] = []
+    for lora in loras:
+        lora_name = lora.get("name", "")
+        lora_info = HARDCODED_LORAS.get(lora_name, {})
+        for trigger in lora_info.get("trigger_words", []):
+            if trigger and trigger not in global_prompt and trigger not in injected_triggers:
+                injected_triggers.append(trigger)
+    if injected_triggers:
+        trigger_text = ", ".join(injected_triggers)
+        global_prompt = f"{trigger_text}, {global_prompt}" if global_prompt else trigger_text
+        logger.info("Injected trigger words into prompt: %s", injected_triggers)
 
     # ------------------------------------------------------------------
     # Load source image
