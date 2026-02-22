@@ -167,13 +167,19 @@ function Ensure-Setup {
 
     # Create volumes (ignore errors if they already exist)
     foreach ($vol in @("ai-toolbox-models", "ai-toolbox-loras")) {
-        Write-Host "  Creating $vol volume..." -ForegroundColor Gray
-        $output = modal volume create $vol 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "  Created $vol" -ForegroundColor Green
-        } else {
-            # Volume likely already exists — that's fine
-            Write-Host "  $vol already exists (OK)" -ForegroundColor DarkGray
+        Write-Host "  Checking $vol..." -ForegroundColor Gray
+        try {
+            $ErrorActionPreference_backup = $ErrorActionPreference
+            $ErrorActionPreference = 'SilentlyContinue'
+            modal volume create $vol *>$null
+            $ErrorActionPreference = $ErrorActionPreference_backup
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  Created $vol" -ForegroundColor Green
+            } else {
+                Write-Host "  $vol already exists" -ForegroundColor DarkGray
+            }
+        } catch {
+            Write-Host "  $vol already exists" -ForegroundColor DarkGray
         }
     }
 
