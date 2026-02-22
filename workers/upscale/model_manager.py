@@ -136,6 +136,9 @@ def get_lora_dir() -> str:
     os.makedirs(lora_dir, exist_ok=True)
     return lora_dir
 
+# Backward-compatible export (used by actions/models.py)
+LORAS_DIR = get_lora_dir()
+
 # ---------------------------------------------------------------------------
 # Supported model registry
 # Maps short model names → local file paths
