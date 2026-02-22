@@ -286,7 +286,8 @@ _TILE_GRID_CSS = """
 </style>
 """
 
-# Inline onclick JS — embedded on each tile div so it fires after Gradio re-renders
+# Inline onclick JS — embedded on each tile div so it fires after Gradio re-renders.
+# Tries both <textarea> and <input> to be compatible with Gradio 4.x and 6.x.
 _TILE_ONCLICK_JS = (
     "(function(el){"
     "var wrap=el.closest('.tile-grid-wrap');"
@@ -298,9 +299,11 @@ _TILE_ONCLICK_JS = (
     "el.classList.add('selected');"
     "wrap&&wrap.classList.add('has-selection');"
     "}"
-    "var tb=document.querySelector('#tile-selected-idx textarea');"
+    "var tb=document.querySelector('#tile-selected-idx textarea')"
+    "||document.querySelector('#tile-selected-idx input');"
     "if(tb){"
-    "var ns=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set;"
+    "var proto=tb.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;"
+    "var ns=Object.getOwnPropertyDescriptor(proto,'value').set;"
     "ns.call(tb,wasSelected?'-1':el.dataset.idx);"
     "tb.dispatchEvent(new Event('input',{bubbles:true}));"
     "tb.dispatchEvent(new Event('change',{bubbles:true}));"
@@ -800,11 +803,31 @@ def _build_upscale_tab() -> None:
         original_img_state = gr.State(value=None)
         full_image_b64_state = gr.State(value="")
 
-        # Hidden textbox for JS → Python tile selection communication
+        # Hidden textbox for JS → Python tile selection communication.
+        # NOTE: visible must be True so Gradio 6.0 renders it in the DOM.
+        # The CSS below hides it visually via #tile-selected-idx.
         tile_selected_idx_tb = gr.Textbox(
             value="-1",
-            visible=False,
+            visible=True,
             elem_id="tile-selected-idx",
+        )
+        gr.HTML(
+            value=(
+                "<style>"
+                "#tile-selected-idx {"
+                "  position: absolute !important;"
+                "  width: 0 !important;"
+                "  height: 0 !important;"
+                "  overflow: hidden !important;"
+                "  opacity: 0 !important;"
+                "  pointer-events: none !important;"
+                "  margin: 0 !important;"
+                "  padding: 0 !important;"
+                "  border: none !important;"
+                "}"
+                "</style>"
+            ),
+            visible=True,
         )
 
         # ----------------------------------------------------------------
