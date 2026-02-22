@@ -1909,7 +1909,7 @@ def _build_model_manager_tab() -> None:
         with gr.Accordion("📥 Download from CivitAI", open=True):
             # Re-use the same BrowserState key as the setup wizard so the
             # token is shared between both UIs.
-            civitai_token_state = gr.BrowserState("", storage_key="civitai_token")
+            civitai_token_state = gr.BrowserState("", storage_key="ait_civitai_token")
 
             with gr.Row():
                 civitai_url_input = gr.Textbox(

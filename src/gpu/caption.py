@@ -121,7 +121,7 @@ class CaptionService:
         request arrives.
         """
         import torch
-        from transformers import AutoModelForVision2Seq, AutoProcessor
+        from transformers import AutoModelForCausalLM, AutoProcessor
 
         # qwen_vl_utils must be imported before AutoProcessor so that the
         # Qwen VL processor classes are registered with the transformers
@@ -150,6 +150,7 @@ class CaptionService:
         _ACCEPTED_ARCHITECTURES = {
             "Qwen2VLForConditionalGeneration",
             "Qwen2_5_VLForConditionalGeneration",
+            "Qwen2_5VLForConditionalGeneration",  # possible variant
         }
         config_path = os.path.join(model_dir, "config.json")
         if os.path.exists(config_path):
@@ -186,7 +187,7 @@ class CaptionService:
         self._models_ready = True
         logger.info("Loading Qwen2.5-VL-3B from '%s'", model_dir)
 
-        self._model = AutoModelForVision2Seq.from_pretrained(
+        self._model = AutoModelForCausalLM.from_pretrained(
             model_dir,
             torch_dtype=torch.float16,
             device_map="auto",

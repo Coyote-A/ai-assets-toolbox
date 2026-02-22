@@ -152,8 +152,8 @@ def create_setup_wizard() -> tuple:
     # ------------------------------------------------------------------
     # BrowserState — persists tokens in the browser's localStorage
     # ------------------------------------------------------------------
-    hf_token_state = gr.BrowserState("", storage_key="hf_token")
-    civitai_token_state = gr.BrowserState("", storage_key="civitai_token")
+    hf_token_state = gr.BrowserState("", storage_key="ait_hf_token")
+    civitai_token_state = gr.BrowserState("", storage_key="ait_civitai_token")
 
     # ------------------------------------------------------------------
     # Outer wrapper — hidden/shown by the parent app
