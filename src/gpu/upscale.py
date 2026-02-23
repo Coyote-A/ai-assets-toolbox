@@ -258,6 +258,10 @@ class UpscaleService:
         self._pipe.enable_model_cpu_offload()
         logger.info("Pipeline ready with CPU offload enabled")
 
+        # Move text encoders to CUDA for Compel (CPU offload keeps them on CPU)
+        self._pipe.text_encoder.to("cuda")
+        self._pipe.text_encoder_2.to("cuda")
+
         # ------------------------------------------------------------------
         # 6. Build Compel for long-prompt encoding
         # ------------------------------------------------------------------
