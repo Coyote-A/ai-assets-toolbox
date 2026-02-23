@@ -34,8 +34,6 @@ Architecture
 * **Model manager** — LoRA and checkpoint management via
   :class:`~src.services.download.DownloadService`.  Metadata (trigger words,
   weights, base model) is stored in ``.metadata.json`` on the LoRA volume.
-  On first page load, :meth:`~src.services.download.DownloadService.migrate_metadata`
-  seeds the metadata store from the legacy hardcoded LoRA list.
 """
 from __future__ import annotations
 
@@ -921,22 +919,6 @@ def create_gradio_app() -> gr.Blocks:
             inputs=on_load_inputs,
             outputs=full_on_load_outputs,
         )
-
-        # 3. Run metadata migration (seeds .metadata.json from legacy hardcoded
-        #    LoRAs and moves flat files into the loras/ subdirectory).
-        def _on_migrate():
-            try:
-                from src.services.download import DownloadService  # noqa: PLC0415
-                result = DownloadService().migrate_metadata.remote()
-                logger.info(
-                    "migrate_metadata: migrated=%d moved=%d",
-                    result.get("migrated", 0),
-                    result.get("moved", 0),
-                )
-            except Exception:  # noqa: BLE001
-                logger.warning("migrate_metadata failed on page load — non-fatal.")
-
-        demo.load(fn=_on_migrate)
 
     return demo
 
