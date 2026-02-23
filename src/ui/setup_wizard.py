@@ -274,7 +274,12 @@ def create_setup_wizard() -> tuple:
             from src.services.download import DownloadService  # noqa: PLC0415
 
             status = DownloadService().check_status.remote()
-            all_ready = all(v["downloaded"] for v in status.values())
+            # Guard against empty status (import issue, uninitialized models, etc.)
+            if not status:
+                logger.warning("check_status() returned empty - models may not be registered")
+                all_ready = False
+            else:
+                all_ready = all(v["downloaded"] for v in status.values())
         except Exception:  # noqa: BLE001
             logger.warning("Could not check model status on page load — showing wizard.")
 
