@@ -809,6 +809,7 @@ def _upscale_tiles_batch(
     controlnet_enabled: bool,
     conditioning_scale: float,
     lora_states: List[Dict],
+    available_loras: Optional[List[Dict]] = None,
     ip_adapter_enabled: bool = False,
     ip_adapter_image: Optional[Image.Image] = None,
     ip_adapter_scale: float = 0.6,
@@ -832,6 +833,7 @@ def _upscale_tiles_batch(
         controlnet_enabled:  whether to use ControlNet Tile.
         conditioning_scale:  ControlNet conditioning scale.
         lora_states:         list of dicts with ``"name"``, ``"enabled"``, ``"weight"``.
+        available_loras:     list of available LoRAs with metadata (including clip_skip).
         ip_adapter_enabled:  whether to use IP-Adapter.
         ip_adapter_image:    style reference PIL Image (optional).
         ip_adapter_scale:    IP-Adapter influence scale.
@@ -885,11 +887,35 @@ def _upscale_tiles_batch(
         })
 
     # Build model_config and gen_params for UpscaleService
-    active_loras = [
-        {"name": s["name"], "filename": s.get("filename", ""), "weight": s.get("weight", 1.0)}
-        for s in lora_states
-        if s.get("enabled", True)
-    ]
+    # Build a lookup from available_loras for clip_skip metadata
+    lora_metadata_map = {}
+    if available_loras:
+        for lora in available_loras:
+            key = lora.get("filename") or lora.get("name", "")
+            lora_metadata_map[key] = lora
+
+    # Extract clip_skip from enabled LoRAs' metadata (use max value when multiple LoRAs)
+    # CLIP Skip is a generation parameter that affects the text encoder
+    clip_skip = 0
+    active_loras = []
+    for s in lora_states:
+        if not s.get("enabled", True):
+            continue
+        lora_entry = {
+            "name": s["name"],
+            "filename": s.get("filename", ""),
+            "weight": s.get("weight", 1.0),
+        }
+        active_loras.append(lora_entry)
+        # Look up clip_skip from available_loras metadata
+        filename = s.get("filename", "")
+        name = s.get("name", "")
+        lora_meta = lora_metadata_map.get(filename) or lora_metadata_map.get(name)
+        if lora_meta:
+            lora_clip_skip = lora_meta.get("clip_skip", 0)
+            if lora_clip_skip > clip_skip:
+                clip_skip = lora_clip_skip
+
     model_config = {
         "loras": active_loras,
         "controlnet": {
@@ -902,6 +928,7 @@ def _upscale_tiles_batch(
         "cfg_scale": cfg_scale,
         "denoising_strength": strength,
         "seed": seed if seed >= 0 else None,
+        "clip_skip": clip_skip,
     }
 
     total_tiles = len(tiles_payload)
@@ -1768,6 +1795,7 @@ def _build_upscale_tab() -> None:
             gen_res_label,
             full_b64,
             lora_states,
+            available_loras,
         ):
             tile_size = int(ts)
             overlap   = int(ov)
@@ -1781,6 +1809,7 @@ def _build_upscale_tab() -> None:
                 strength, int(steps), cfg, int(seed),
                 cn_enabled, cond_scale,
                 lora_states=lora_states,
+                available_loras=available_loras,
                 ip_adapter_enabled=ip_enabled,
                 ip_adapter_image=ip_img,
                 ip_adapter_scale=ip_scale,
@@ -1816,13 +1845,29 @@ def _build_upscale_tab() -> None:
                                 "prompt_override": None,
                             })
 
-                        active_loras = [
-                            {"name": s["name"], "filename": s.get("filename", ""), "weight": s.get("weight", 1.0)}
-                            for s in lora_states
-                            if s.get("enabled", True)
-                        ]
+                        # Build active LoRAs and extract clip_skip for seam fix pass
+                        # Use the same lora_metadata_map built earlier
+                        seam_clip_skip = 0
+                        seam_active_loras = []
+                        for s in lora_states:
+                            if not s.get("enabled", True):
+                                continue
+                            seam_active_loras.append({
+                                "name": s["name"],
+                                "filename": s.get("filename", ""),
+                                "weight": s.get("weight", 1.0),
+                            })
+                            # Look up clip_skip from available_loras metadata
+                            filename = s.get("filename", "")
+                            name = s.get("name", "")
+                            lora_meta = lora_metadata_map.get(filename) or lora_metadata_map.get(name)
+                            if lora_meta:
+                                lora_clip_skip = lora_meta.get("clip_skip", 0)
+                                if lora_clip_skip > seam_clip_skip:
+                                    seam_clip_skip = lora_clip_skip
+
                         seam_model_config = {
-                            "loras": active_loras,
+                            "loras": seam_active_loras,
                             "controlnet": {"enabled": cn_enabled, "conditioning_scale": cond_scale},
                         }
                         seam_gen_params = {
@@ -1830,6 +1875,7 @@ def _build_upscale_tab() -> None:
                             "cfg_scale": cfg,
                             "denoising_strength": float(seam_fix_strength),
                             "seed": int(seed) if int(seed) >= 0 else None,
+                            "clip_skip": seam_clip_skip,
                         }
 
                         from src.gpu.upscale import UpscaleService
@@ -1884,6 +1930,7 @@ def _build_upscale_tab() -> None:
                 gen_res_dd,
                 full_image_b64_state,
                 lora_selections_state,
+                available_loras_state,
             ],
             outputs=[tiles_state, tile_grid_html, result_image, status_text],
         )
@@ -1901,6 +1948,7 @@ def _build_upscale_tab() -> None:
             gen_res_label,
             full_b64,
             lora_states,
+            available_loras,
         ):
             if selected_idx < 0:
                 grid_html = _rebuild_grid_html(tiles, full_b64, selected_idx, orig_img)
@@ -1915,6 +1963,7 @@ def _build_upscale_tab() -> None:
                 strength, int(steps), cfg, int(seed),
                 cn_enabled, cond_scale,
                 lora_states=lora_states,
+                available_loras=available_loras,
                 ip_adapter_enabled=ip_enabled,
                 ip_adapter_image=ip_img,
                 ip_adapter_scale=ip_scale,
@@ -1937,6 +1986,7 @@ def _build_upscale_tab() -> None:
                 gen_res_dd,
                 full_image_b64_state,
                 lora_selections_state,
+                available_loras_state,
             ],
             outputs=[tiles_state, tile_grid_html, tile_proc_preview, result_image, status_text],
         )

@@ -392,6 +392,7 @@ class UpscaleService:
         cfg_scale: float = float(gen_params.get("cfg_scale", 7.0))
         strength: float = float(gen_params.get("denoising_strength", 0.35))
         base_seed: Optional[int] = gen_params.get("seed")
+        clip_skip: int = int(gen_params.get("clip_skip", 0))
 
         if target_width is not None:
             target_width = int(target_width)
@@ -400,7 +401,7 @@ class UpscaleService:
 
         logger.info(
             "upscale_tiles: tiles=%d steps=%d strength=%.2f controlnet=%s "
-            "ip_adapter=%s target=%s",
+            "ip_adapter=%s target=%s clip_skip=%d",
             len(tiles),
             steps,
             strength,
@@ -479,6 +480,7 @@ class UpscaleService:
                 ip_adapter_loaded=self._ip_adapter_loaded,
                 target_width=target_width,
                 target_height=target_height,
+                clip_skip=clip_skip,
             )
 
             result_bytes = _pil_to_bytes(output_image)
@@ -584,6 +586,7 @@ class UpscaleService:
         cfg_scale: float = float(gen_params.get("cfg_scale", 7.0))
         strength: float = float(gen_params.get("denoising_strength", 0.35))
         base_seed: Optional[int] = gen_params.get("seed")
+        clip_skip: int = int(gen_params.get("clip_skip", 0))
 
         if target_width is not None:
             target_width = int(target_width)
@@ -592,7 +595,7 @@ class UpscaleService:
 
         logger.info(
             "process_tile_batch: batch_id=%d tiles=%d steps=%d strength=%.2f controlnet=%s "
-            "ip_adapter=%s target=%s",
+            "ip_adapter=%s target=%s clip_skip=%d",
             batch_id,
             len(tiles),
             steps,
@@ -600,6 +603,7 @@ class UpscaleService:
             controlnet_enabled,
             ip_adapter_enabled,
             f"{target_width}x{target_height}" if target_width and target_height else "from_image",
+            clip_skip,
         )
 
         # Inject trigger words for active LoRAs into the global prompt
@@ -675,6 +679,7 @@ class UpscaleService:
                     ip_adapter_loaded=self._ip_adapter_loaded,
                     target_width=target_width,
                     target_height=target_height,
+                    clip_skip=clip_skip,
                 )
 
                 result_bytes = _pil_to_bytes(output_image)
@@ -1522,6 +1527,7 @@ def _run_sdxl(
     ip_adapter_loaded: bool = False,
     target_width: Optional[int] = None,
     target_height: Optional[int] = None,
+    clip_skip: int = 0,
 ) -> Any:
     """
     Run the SDXL ControlNet img2img pipeline for a single image.
@@ -1556,6 +1562,9 @@ def _run_sdxl(
         the UNet's image_embeds requirement (scale is 0 so content doesn't matter).
     target_width, target_height:
         Optional explicit output dimensions.
+    clip_skip:
+        Number of layers to skip in the CLIP text encoder (0 = disabled, 1-12).
+        Higher values produce more abstract interpretations.
 
     Returns
     -------
@@ -1616,9 +1625,14 @@ def _run_sdxl(
         dummy_image = Image.new("RGB", (224, 224), (0, 0, 0))
         kwargs["ip_adapter_image"] = dummy_image
 
+    # CLIP Skip - pass to pipeline when enabled (value > 0)
+    # This skips the last N layers of the CLIP text encoder
+    if clip_skip > 0:
+        kwargs["clip_skip"] = clip_skip
+
     logger.info(
         "SDXL generate: steps=%d strength=%.2f cfg=%.1f seed=%d controlnet=%s "
-        "(scale=%.2f) ip_adapter=%s target=%s compel=%s prompt_len=%d",
+        "(scale=%.2f) ip_adapter=%s target=%s compel=%s clip_skip=%d prompt_len=%d",
         steps,
         strength,
         cfg_scale,
@@ -1628,6 +1642,7 @@ def _run_sdxl(
         ip_adapter_image is not None,
         f"{target_width}x{target_height}" if target_width and target_height else "from_image",
         use_compel,
+        clip_skip,
         len(prompt),
     )
 
