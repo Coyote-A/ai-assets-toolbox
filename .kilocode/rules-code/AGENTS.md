@@ -1,10 +1,5 @@
 # Code Mode Rules (Non-Obvious Only)
 
-## Workflow
-- **Always use `.\serve.ps1`** for development — never deploy without explicit user request. Serve mode shows logs directly and saves tokens by shutting down when done.
-- **Always commit changes** after completing a task.
-- **Update AGENTS.md** when discovering important non-obvious patterns.
-
 ## Debugging Modal Volumes
 ```powershell
 modal volume ls ai-toolbox-models              # List root contents
