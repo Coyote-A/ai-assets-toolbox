@@ -1005,7 +1005,52 @@ def create_gradio_app() -> gr.Blocks:
     """
     from src.ui.setup_wizard import create_setup_wizard  # noqa: PLC0415
 
-    with gr.Blocks(title="AI Assets Toolbox") as demo:
+    # Custom CSS for responsive layout and better element sizing
+    custom_css = """
+    /* Container max-width for better readability */
+    .gradio-container { max-width: 100% !important; }
+    
+    /* Responsive columns */
+    @media (max-width: 1200px) {
+        .gr-row > .gr-column { min-width: 100% !important; flex: 1 1 100% !important; }
+    }
+    
+    /* Prevent overflow in accordions */
+    .gr-accordion { overflow-x: hidden; }
+    .gr-accordion .gr-panel { overflow-x: auto; }
+    
+    /* Better slider sizing */
+    .gr-slider input[type="range"] { max-width: 100%; }
+    
+    /* Fix button overflow */
+    .gr-button { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    
+    /* Image containers */
+    .gr-image { max-width: 100%; }
+    .gr-image img { max-width: 100%; height: auto; object-fit: contain; }
+    
+    /* LoRA controls container */
+    #upscale-lora-controls { max-height: 250px; overflow-y: auto; }
+    
+    /* Model manager cards */
+    .mm-model-card { overflow: hidden; }
+    .mm-card-actions { flex-shrink: 0; }
+    
+    /* Fix textbox overflow */
+    .gr-textbox input, .gr-textbox textarea { max-width: 100%; box-sizing: border-box; }
+    
+    /* Fix number input */
+    .gr-number input { max-width: 100%; box-sizing: border-box; }
+    
+    /* Dropdown fix */
+    .gr-dropdown { max-width: 100%; }
+    """
+
+    # Gradio 6.0 moved css to launch(), but 6.1+ restored it to Blocks constructor.
+    # Setting css as attribute after creation works in all 6.x versions.
+    demo = gr.Blocks(title="AI Assets Toolbox")
+    demo.css = custom_css
+    with demo:
         gr.Markdown("# 🎨 AI Assets Toolbox")
         gr.Markdown(
             "Tile-based AI upscaling powered by Illustrious-XL + ControlNet Tile on Modal GPU."
@@ -1188,9 +1233,9 @@ def _build_upscale_tab() -> None:
         with gr.Row(equal_height=False):
 
             # ============================================================
-            # LEFT COLUMN (~65%): Tile grid + selected tile + actions
+            # LEFT COLUMN (~60%): Tile grid + selected tile + actions
             # ============================================================
-            with gr.Column(scale=13, min_width=480):
+            with gr.Column(scale=3, min_width=400):
 
                 gr.Markdown("### 🗂️ Tile Grid — click to select")
                 tile_grid_html = gr.HTML(
@@ -1259,9 +1304,9 @@ def _build_upscale_tab() -> None:
                 download_file = gr.File(visible=False, label="Download")
 
             # ============================================================
-            # RIGHT COLUMN (~35%): Settings accordions
+            # RIGHT COLUMN (~40%): Settings accordions
             # ============================================================
-            with gr.Column(scale=7, min_width=300):
+            with gr.Column(scale=2, min_width=320):
 
                 # ---- 📐 Grid Settings ----
                 with gr.Accordion("📐 Grid Settings", open=True):
@@ -1343,47 +1388,47 @@ def _build_upscale_tab() -> None:
                         )
 
                     # LoRA Controls (dynamic — loaded from DownloadService)
-                        gr.Markdown("### LoRA Controls")
-                        with gr.Row():
-                            lora_refresh_btn = gr.Button(
-                                "🔄 Refresh LoRA List",
-                                variant="secondary",
-                                scale=1,
-                                size="sm",
-                            )
-                        lora_controls_html = gr.HTML(
-                            value=(
-                                "<p style='color:#888;font-style:italic;font-size:0.9em;'>"
-                                "Loading LoRA list… click 🔄 Refresh LoRA List if it doesn't appear."
-                                "</p>"
-                            ),
-                            sanitize_html=False,
-                            elem_id="upscale-lora-controls",
+                    gr.Markdown("### LoRA Controls")
+                    with gr.Row():
+                        lora_refresh_btn = gr.Button(
+                            "🔄 Refresh LoRA List",
+                            variant="secondary",
+                            scale=1,
+                            size="sm",
                         )
-                        # Hidden textbox: JS checkboxes/sliders write JSON here
-                        lora_selection_tb = gr.Textbox(
-                            value="[]",
-                            visible=True,
-                            elem_id="upscale-lora-selection",
-                        )
-                        gr.HTML(
-                            value=(
-                                "<style>"
-                                "#upscale-lora-selection {"
-                                "  position: absolute !important;"
-                                "  width: 0 !important;"
-                                "  height: 0 !important;"
-                                "  overflow: hidden !important;"
-                                "  opacity: 0 !important;"
-                                "  pointer-events: none !important;"
-                                "  margin: 0 !important;"
-                                "  padding: 0 !important;"
-                                "  border: none !important;"
-                                "}"
-                                "</style>"
-                            ),
-                            visible=True,
-                        )
+                    lora_controls_html = gr.HTML(
+                        value=(
+                            "<p style='color:#888;font-style:italic;font-size:0.9em;'>"
+                            "Loading LoRA list… click 🔄 Refresh LoRA List if it doesn't appear."
+                            "</p>"
+                        ),
+                        sanitize_html=False,
+                        elem_id="upscale-lora-controls",
+                    )
+                    # Hidden textbox: JS checkboxes/sliders write JSON here
+                    lora_selection_tb = gr.Textbox(
+                        value="[]",
+                        visible=True,
+                        elem_id="upscale-lora-selection",
+                    )
+                    gr.HTML(
+                        value=(
+                            "<style>"
+                            "#upscale-lora-selection {"
+                            "  position: absolute !important;"
+                            "  width: 0 !important;"
+                            "  height: 0 !important;"
+                            "  overflow: hidden !important;"
+                            "  opacity: 0 !important;"
+                            "  pointer-events: none !important;"
+                            "  margin: 0 !important;"
+                            "  padding: 0 !important;"
+                            "  border: none !important;"
+                            "}"
+                            "</style>"
+                        ),
+                        visible=True,
+                    )
 
                 # ---- 🔧 ControlNet ----
                 with gr.Accordion("🔧 ControlNet", open=False):
