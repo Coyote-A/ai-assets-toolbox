@@ -27,6 +27,7 @@ from src.services.model_registry import (
     PROGRESS_FILE,
     ModelEntry,
     get_model,
+    is_model_downloaded,
     read_manifest,
     write_manifest,
 )
@@ -201,10 +202,7 @@ class DownloadService:
         result: dict = {}
         for entry in ALL_MODELS:
             result[entry.key] = {
-                "downloaded": (
-                    entry.key in manifest
-                    and manifest[entry.key].get("completed", False)
-                ),
+                "downloaded": is_model_downloaded(entry.key, MODELS_MOUNT_PATH),
                 "size_bytes": entry.size_bytes,
                 "description": entry.description,
             }
