@@ -1250,13 +1250,16 @@ def _build_compel(pipe: Any) -> Optional[Any]:
             )
             return None
 
+        # Get device from text encoder to ensure tensors are on the same device
+        device = next(pipe.text_encoder.parameters()).device
         compel = Compel(
             tokenizer=[pipe.tokenizer, pipe.tokenizer_2],
             text_encoder=[pipe.text_encoder, pipe.text_encoder_2],
             returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
             requires_pooled=[False, True],
+            device=device,
         )
-        logger.info("Compel long-prompt encoder initialised")
+        logger.info("Compel long-prompt encoder initialised on device: %s", device)
         return compel
     except ImportError:
         logger.warning(
