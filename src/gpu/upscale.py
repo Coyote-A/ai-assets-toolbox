@@ -93,8 +93,8 @@ LORAS_SUBDIR = os.path.join(LORAS_MOUNT_PATH, "loras")  # /vol/loras/loras — n
     image=upscale_image,
     # Keep the container alive for 5 minutes after the last request.
     scaledown_window=300,
-    # Hard timeout per request (10 minutes for large tile batches).
-    timeout=600,
+    # 40 minutes — handles up to ~35 tiles with safety margin
+    timeout=2400,
     # Mount the models volume at /vol/models/ and the LoRA volume at /vol/loras/
     volumes={
         MODELS_MOUNT_PATH: models_volume,
@@ -494,6 +494,217 @@ class UpscaleService:
             _remove_loras(self._pipe, applied_lora_names)
 
         return results
+
+    @modal.method()
+    def process_tile_batch(
+        self,
+        batch_id: int,
+        tiles: list[dict],
+        model_config: dict,
+        gen_params: dict,
+        global_prompt: str = "",
+        negative_prompt: str = "",
+        ip_adapter_enabled: bool = False,
+        ip_adapter_image_bytes: Optional[bytes] = None,
+        ip_adapter_scale: float = 0.6,
+        target_width: Optional[int] = None,
+        target_height: Optional[int] = None,
+    ) -> dict:
+        """
+        Process a batch of tiles through the SDXL img2img pipeline.
+
+        This method is designed to be called via .map() for parallel processing
+        across multiple GPU containers. Each container processes one batch.
+
+        Parameters
+        ----------
+        batch_id: int
+            Unique identifier for this batch (e.g., 0, 1, 2).
+        tiles: list[dict]
+            List of tile dicts for this batch only. Each with:
+            - ``"tile_id"`` (str): unique identifier, e.g. ``"0_0"``.
+            - ``"image_bytes"`` (bytes): raw PNG or JPEG bytes of the tile.
+            - ``"prompt_override"`` (str, optional): per-tile prompt suffix.
+        model_config: dict
+            Same structure as in ``upscale_tiles``.
+        gen_params: dict
+            Same structure as in ``upscale_tiles``.
+        global_prompt: str
+            Positive prompt applied to all tiles.
+        negative_prompt: str
+            Negative prompt applied to all tiles.
+        ip_adapter_enabled: bool
+            Whether to use IP-Adapter style conditioning.
+        ip_adapter_image_bytes: Optional[bytes]
+            Raw bytes of the style reference image (PNG/JPEG).
+        ip_adapter_scale: float
+            IP-Adapter influence scale (0.0–1.0).
+        target_width, target_height: Optional[int]
+            Optional explicit output dimensions for each tile.
+
+        Returns
+        -------
+        dict
+            {
+                "batch_id": int,
+                "results": list[dict],  # Same format as upscale_tiles
+                "success": bool,
+                "error": Optional[str],
+                "tiles_processed": int,
+            }
+        """
+        if not getattr(self, "_models_ready", False):
+            return {
+                "batch_id": batch_id,
+                "results": [],
+                "success": False,
+                "error": "Models not downloaded. Please run the setup wizard first.",
+                "tiles_processed": 0,
+            }
+
+        if not tiles:
+            return {
+                "batch_id": batch_id,
+                "results": [],
+                "success": True,
+                "error": None,
+                "tiles_processed": 0,
+            }
+
+        # Parse model config
+        loras: list[dict] = model_config.get("loras", [])
+        controlnet_cfg: dict = model_config.get("controlnet", {})
+        controlnet_enabled: bool = bool(controlnet_cfg.get("enabled", False))
+        controlnet_conditioning_scale: float = float(
+            controlnet_cfg.get("conditioning_scale", 0.6)
+        )
+
+        # Parse generation params
+        steps: int = int(gen_params.get("steps", 30))
+        cfg_scale: float = float(gen_params.get("cfg_scale", 7.0))
+        strength: float = float(gen_params.get("denoising_strength", 0.35))
+        base_seed: Optional[int] = gen_params.get("seed")
+
+        if target_width is not None:
+            target_width = int(target_width)
+        if target_height is not None:
+            target_height = int(target_height)
+
+        logger.info(
+            "process_tile_batch: batch_id=%d tiles=%d steps=%d strength=%.2f controlnet=%s "
+            "ip_adapter=%s target=%s",
+            batch_id,
+            len(tiles),
+            steps,
+            strength,
+            controlnet_enabled,
+            ip_adapter_enabled,
+            f"{target_width}x{target_height}" if target_width and target_height else "from_image",
+        )
+
+        # Inject trigger words for active LoRAs into the global prompt
+        global_prompt = _inject_trigger_words(global_prompt, loras, LORAS_DIR)
+
+        # Apply LoRAs
+        lora_volume.reload()
+        applied_lora_names: list[str] = []
+        if loras:
+            applied_lora_names = _apply_loras(self._pipe, loras, LORAS_DIR)
+
+        # IP-Adapter
+        ip_adapter_pil: Optional[Any] = None
+        if ip_adapter_enabled and ip_adapter_image_bytes:
+            self._load_ip_adapter(scale=ip_adapter_scale)
+            if self._ip_adapter_loaded:
+                raw_ip_img = _bytes_to_pil(ip_adapter_image_bytes)
+                ip_adapter_pil = raw_ip_img.resize((224, 224))
+                logger.info("IP-Adapter style image prepared (224×224)")
+            else:
+                logger.warning(
+                    "IP-Adapter requested but failed to load — proceeding without it"
+                )
+        else:
+            self._unload_ip_adapter()
+
+        # Process tiles
+        results: list[dict] = []
+        errors: list[str] = []
+
+        for tile_entry in tiles:
+            tile_id: str = tile_entry.get("tile_id", "unknown")
+            image_bytes: bytes = tile_entry.get("image_bytes", b"")
+            prompt_override: Optional[str] = tile_entry.get("prompt_override")
+
+            if not image_bytes:
+                logger.warning("Tile '%s' has no image data — skipping", tile_id)
+                results.append({"tile_id": tile_id, "image_bytes": b"", "seed_used": None, "error": "No image data"})
+                errors.append(f"{tile_id}: no image data")
+                continue
+
+            # Compose prompt
+            if prompt_override:
+                prompt = f"{global_prompt}, {prompt_override}" if global_prompt else prompt_override
+            else:
+                prompt = global_prompt
+
+            tile_seed: int = base_seed if base_seed is not None else random.randint(0, 2**32 - 1)
+
+            try:
+                pil_image = _bytes_to_pil(image_bytes)
+                logger.info(
+                    "Processing tile '%s' (%dx%d) seed=%d",
+                    tile_id,
+                    pil_image.width,
+                    pil_image.height,
+                    tile_seed,
+                )
+
+                output_image = _run_sdxl(
+                    pipe=self._pipe,
+                    compel=self._compel,
+                    image=pil_image,
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    strength=strength,
+                    steps=steps,
+                    cfg_scale=cfg_scale,
+                    seed=tile_seed,
+                    controlnet_enabled=controlnet_enabled,
+                    controlnet_conditioning_scale=controlnet_conditioning_scale,
+                    ip_adapter_image=ip_adapter_pil,
+                    ip_adapter_loaded=self._ip_adapter_loaded,
+                    target_width=target_width,
+                    target_height=target_height,
+                )
+
+                result_bytes = _pil_to_bytes(output_image)
+                results.append({
+                    "tile_id": tile_id,
+                    "image_bytes": result_bytes,
+                    "seed_used": tile_seed,
+                })
+                logger.info("Tile '%s' processed successfully", tile_id)
+            except Exception as e:  # pylint: disable=broad-except
+                logger.error("Tile '%s' failed: %s", tile_id, e)
+                results.append({
+                    "tile_id": tile_id,
+                    "image_bytes": b"",
+                    "seed_used": None,
+                    "error": str(e),
+                })
+                errors.append(f"{tile_id}: {e}")
+
+        # Clean up LoRAs after all tiles are processed
+        if applied_lora_names:
+            _remove_loras(self._pipe, applied_lora_names)
+
+        return {
+            "batch_id": batch_id,
+            "results": results,
+            "success": len(errors) == 0,
+            "error": "; ".join(errors) if errors else None,
+            "tiles_processed": sum(1 for r in results if "error" not in r),
+        }
 
     @modal.method()
     def upscale_regions(

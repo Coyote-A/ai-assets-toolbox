@@ -646,6 +646,153 @@ def _caption_selected_tile(
 # Upscale workflow
 # ---------------------------------------------------------------------------
 
+# Batch processing configuration
+DEFAULT_BATCH_SIZE = 10  # Tiles per batch for parallel processing
+MAX_TILES_FOR_SEQUENTIAL = 25  # Use sequential processing below this threshold
+
+
+def _upscale_tiles_parallel(
+    tiles_payload: List[Dict],
+    model_config: Dict,
+    gen_params: Dict,
+    effective_prompt: str,
+    negative_prompt: str,
+    ip_adapter_enabled: bool,
+    ip_adapter_bytes: Optional[bytes],
+    ip_adapter_scale: float,
+    effective_gen_res: int,
+    progress: gr.Progress = None,
+) -> Tuple[List[Dict], str]:
+    """
+    Process tiles in parallel batches using Modal .map().
+
+    This function splits tiles into batches and processes them in parallel
+    across multiple GPU containers for large images (8K+).
+
+    Args:
+        tiles_payload: List of tile dicts with image_bytes and tile_id.
+        model_config: Model configuration dict (loras, controlnet).
+        gen_params: Generation parameters dict (steps, cfg_scale, etc.).
+        effective_prompt: Global prompt with trigger words injected.
+        negative_prompt: Negative prompt for all tiles.
+        ip_adapter_enabled: Whether IP-Adapter is enabled.
+        ip_adapter_bytes: Style reference image bytes (if any).
+        ip_adapter_scale: IP-Adapter influence scale.
+        effective_gen_res: Generation resolution per tile.
+        progress: Gradio Progress tracker for UI updates.
+
+    Returns:
+        (results_list, status_message)
+    """
+    from src.gpu.upscale import UpscaleService
+
+    total_tiles = len(tiles_payload)
+
+    # Auto-determine batch size based on tile count
+    if total_tiles <= 10:
+        batch_size = total_tiles  # Single batch for small images
+    elif total_tiles <= 30:
+        batch_size = 10
+    else:
+        # For large images (81 tiles), aim for ~9 parallel batches
+        batch_size = max(9, total_tiles // 9)
+
+    # Split into batches
+    batches = [
+        tiles_payload[i:i + batch_size]
+        for i in range(0, total_tiles, batch_size)
+    ]
+    batch_count = len(batches)
+
+    logger.info(
+        "Starting parallel upscale: %d tiles in %d batches (batch_size=%d)",
+        total_tiles, batch_count, batch_size
+    )
+
+    # Prepare batch inputs for .map()
+    # Each input is a dict matching process_tile_batch parameters
+    batch_inputs = [
+        {
+            "batch_id": i,
+            "tiles": batch,
+            "model_config": model_config,
+            "gen_params": gen_params,
+            "global_prompt": effective_prompt,
+            "negative_prompt": negative_prompt,
+            "ip_adapter_enabled": ip_adapter_enabled and ip_adapter_bytes is not None,
+            "ip_adapter_image_bytes": ip_adapter_bytes,
+            "ip_adapter_scale": ip_adapter_scale,
+            "target_width": effective_gen_res,
+            "target_height": effective_gen_res,
+        }
+        for i, batch in enumerate(batches)
+    ]
+
+    # Process in parallel with progress tracking
+    all_results: List[Dict] = []
+    errors: List[str] = []
+    completed_batches = 0
+
+    try:
+        # Use .map() for parallel execution
+        # Modal handles distributing batches across containers
+        service = UpscaleService()
+        for batch_result in service.process_tile_batch.map(
+            [inp["batch_id"] for inp in batch_inputs],
+            [inp["tiles"] for inp in batch_inputs],
+            [inp["model_config"] for inp in batch_inputs],
+            [inp["gen_params"] for inp in batch_inputs],
+            [inp["global_prompt"] for inp in batch_inputs],
+            [inp["negative_prompt"] for inp in batch_inputs],
+            [inp["ip_adapter_enabled"] for inp in batch_inputs],
+            [inp["ip_adapter_image_bytes"] for inp in batch_inputs],
+            [inp["ip_adapter_scale"] for inp in batch_inputs],
+            [inp["target_width"] for inp in batch_inputs],
+            [inp["target_height"] for inp in batch_inputs],
+        ):
+            completed_batches += 1
+            batch_id = batch_result.get("batch_id", "?")
+
+            if batch_result.get("success", False):
+                all_results.extend(batch_result.get("results", []))
+                logger.info(
+                    "Batch %s completed: %d tiles processed",
+                    batch_id, batch_result.get("tiles_processed", 0)
+                )
+            else:
+                # Batch had failures - collect partial results
+                results = batch_result.get("results", [])
+                for r in results:
+                    if "error" not in r or r.get("image_bytes"):
+                        all_results.append(r)
+                error_msg = batch_result.get("error", "Unknown error")
+                errors.append(f"Batch {batch_id}: {error_msg}")
+                logger.warning("Batch %s had failures: %s", batch_id, error_msg)
+
+            # Update progress
+            if progress:
+                processed = sum(
+                    1 for r in all_results if r.get("image_bytes")
+                )
+                progress(
+                    completed_batches / batch_count,
+                    desc=f"Processing batch {completed_batches}/{batch_count} ({processed}/{total_tiles} tiles)"
+                )
+
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Parallel upscale error")
+        return all_results, f"❌ Parallel upscale error: {exc}"
+
+    # Build status message
+    successful_tiles = sum(1 for r in all_results if r.get("image_bytes"))
+    status = f"Processed {successful_tiles}/{total_tiles} tiles in {batch_count} batches"
+    if errors:
+        status += f" | ⚠️ Errors: {'; '.join(errors[:3])}"
+        if len(errors) > 3:
+            status += f" (and {len(errors) - 3} more)"
+
+    return all_results, status
+
 
 def _upscale_tiles_batch(
     tiles_state: List[Dict],
@@ -757,24 +904,51 @@ def _upscale_tiles_batch(
         "seed": seed if seed >= 0 else None,
     }
 
-    try:
-        from src.gpu.upscale import UpscaleService
+    total_tiles = len(tiles_payload)
 
-        results: List[Dict] = UpscaleService().upscale_tiles.remote(
-            tiles=tiles_payload,
+    # Route based on tile count - use parallel for large images
+    if total_tiles > MAX_TILES_FOR_SEQUENTIAL:
+        logger.info(
+            "Using parallel processing for %d tiles (threshold: %d)",
+            total_tiles, MAX_TILES_FOR_SEQUENTIAL
+        )
+        results, processing_status = _upscale_tiles_parallel(
+            tiles_payload=tiles_payload,
             model_config=model_config,
             gen_params=gen_params,
-            global_prompt=effective_prompt,
+            effective_prompt=effective_prompt,
             negative_prompt=negative_prompt,
-            ip_adapter_enabled=ip_adapter_enabled and ip_adapter_bytes is not None,
-            ip_adapter_image_bytes=ip_adapter_bytes,
+            ip_adapter_enabled=ip_adapter_enabled,
+            ip_adapter_bytes=ip_adapter_bytes,
             ip_adapter_scale=ip_adapter_scale,
-            target_width=effective_gen_res,
-            target_height=effective_gen_res,
+            effective_gen_res=effective_gen_res,
+            progress=None,  # Progress passed through Gradio event handler
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Upscale error")
-        return tiles_state, None, f"❌ Upscale error: {exc}"
+    else:
+        # Sequential processing for small images
+        logger.info(
+            "Using sequential processing for %d tiles (threshold: %d)",
+            total_tiles, MAX_TILES_FOR_SEQUENTIAL
+        )
+        try:
+            from src.gpu.upscale import UpscaleService
+
+            results: List[Dict] = UpscaleService().upscale_tiles.remote(
+                tiles=tiles_payload,
+                model_config=model_config,
+                gen_params=gen_params,
+                global_prompt=effective_prompt,
+                negative_prompt=negative_prompt,
+                ip_adapter_enabled=ip_adapter_enabled and ip_adapter_bytes is not None,
+                ip_adapter_image_bytes=ip_adapter_bytes,
+                ip_adapter_scale=ip_adapter_scale,
+                target_width=effective_gen_res,
+                target_height=effective_gen_res,
+            )
+            processing_status = f"Processed {len(results)} tiles"
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Upscale error")
+            return tiles_state, None, f"❌ Upscale error: {exc}"
 
     # Store results back into tiles_state
     result_map = {r["tile_id"]: r["image_bytes"] for r in results}
@@ -803,7 +977,7 @@ def _upscale_tiles_batch(
     processed_count = sum(1 for t in tiles_state if t.get("processed_bytes"))
     gen_res_label = f" (gen @ {effective_gen_res}px)" if effective_gen_res != tile_size else ""
     status = (
-        f"✅ Processed {len(results)} tile(s){gen_res_label}. "
+        f"✅ {processing_status}{gen_res_label}. "
         f"Total processed: {processed_count}/{len(tiles_state)}."
     )
     return tiles_state, result_img, status
@@ -931,7 +1105,8 @@ def create_gradio_app() -> gr.Blocks:
 def _build_upscale_tab() -> None:
     """Render the Tile Upscale tab inside a Gradio Blocks context."""
 
-    with gr.Tab("🖼️ Tile Upscale"):
+    upscale_tab = gr.Tab("🖼️ Tile Upscale")
+    with upscale_tab:
 
         # ----------------------------------------------------------------
         # State
@@ -1399,7 +1574,7 @@ def _build_upscale_tab() -> None:
                 ".lora-weight-label{font-size:0.82em;color:#aaa;min-width:60px;text-align:right;}"
                 "</style>"
             )
-            rows.append('<div style="border:1px solid #444;border-radius:8px;padding:8px 12px;">')
+            rows.append('<div style="border:1px solid #444;border-radius:8px;padding:8px 12px;max-height:300px;overflow-y:auto;">')
 
             for lora in loras:
                 name = lora.get("name") or lora.get("filename", "Unknown")
@@ -1429,7 +1604,7 @@ def _build_upscale_tab() -> None:
                     "  });"
                     "  var tb = document.getElementById('upscale-lora-selection');"
                     "  if(tb){"
-                    "    var ta = tb.querySelector('textarea');"
+                    "    var ta = tb.querySelector('textarea') || tb.querySelector('input');"
                     "    if(ta){ta.value=JSON.stringify(sels);"
                     "      ta.dispatchEvent(new Event('input'));}"
                     "  }"
@@ -1502,6 +1677,15 @@ def _build_upscale_tab() -> None:
             return html, loras, default_sels
 
         lora_refresh_btn.click(
+            fn=on_lora_refresh,
+            inputs=[],
+            outputs=[lora_controls_html, available_loras_state, lora_selections_state],
+        )
+
+        # ----------------------------------------------------------------
+        # Tab select → refresh LoRA list when upscale tab is selected
+        # ----------------------------------------------------------------
+        upscale_tab.select(
             fn=on_lora_refresh,
             inputs=[],
             outputs=[lora_controls_html, available_loras_state, lora_selections_state],
