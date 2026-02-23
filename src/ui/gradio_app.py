@@ -1786,8 +1786,22 @@ _MODEL_MANAGER_CSS = """
 .mm-model-name { font-weight: bold; font-size: 1.05em; color: #e0e0e0; }
 .mm-model-meta { font-size: 0.85em; color: #999; margin-top: 4px; }
 .mm-model-triggers { font-size: 0.82em; color: #aaa; margin-top: 2px; }
-.mm-delete-btn {
+.mm-card-actions {
   float: right;
+  display: flex;
+  gap: 6px;
+}
+.mm-edit-btn {
+  background: #2196F3;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 0.85em;
+}
+.mm-edit-btn:hover { background: #1976D2; }
+.mm-delete-btn {
   background: #c0392b;
   color: white;
   border: none;
@@ -1841,6 +1855,15 @@ def _build_model_list_html(models: List[Dict], filter_type: str = "All") -> str:
         size_str = _format_size(m.get("size_bytes", 0))
         triggers = m.get("trigger_words") or []
         trigger_str = ", ".join(triggers) if triggers else "(none)"
+        
+        # JS for edit button - writes filename to hidden textbox
+        edit_target_val = f"{filename}|{model_type_raw}"
+        edit_js = (
+            f"document.getElementById('mm-edit-target').querySelector('textarea').value"
+            f" = '{edit_target_val}'; "
+            f"document.getElementById('mm-edit-target').querySelector('textarea').dispatchEvent(new Event('input'));"
+        )
+        
         # JS onclick writes filename + model_type into the hidden textbox
         # so the Python delete handler can pick it up.
         delete_target_val = f"{filename}|{model_type_raw}"
@@ -1851,7 +1874,10 @@ def _build_model_list_html(models: List[Dict], filter_type: str = "All") -> str:
         )
         cards.append(
             f'<div class="mm-model-card">'
-            f'  <button class="mm-delete-btn" onclick="{delete_js}">🗑️ Delete</button>'
+            f'  <div class="mm-card-actions">'
+            f'    <button class="mm-edit-btn" onclick="{edit_js}">✏️ Edit</button>'
+            f'    <button class="mm-delete-btn" onclick="{delete_js}">🗑️ Delete</button>'
+            f'  </div>'
             f'  <div class="mm-model-name">{name}</div>'
             f'  <div class="mm-model-meta">{mtype} · {base} · {size_str}</div>'
             f'  <div class="mm-model-triggers">Triggers: {trigger_str}</div>'
@@ -2160,10 +2186,18 @@ def _build_model_manager_tab() -> None:
                 visible=True,
                 elem_id="mm-delete-target",
             )
+            
+            # Hidden textbox for edit button communication
+            mm_edit_target_tb = gr.Textbox(
+                value="",
+                visible=True,
+                elem_id="mm-edit-target",
+            )
+            
             gr.HTML(
                 value=(
                     "<style>"
-                    "#mm-delete-target {"
+                    "#mm-delete-target, #mm-edit-target {"
                     "  position: absolute !important;"
                     "  width: 0 !important;"
                     "  height: 0 !important;"
@@ -2253,6 +2287,228 @@ def _build_model_manager_tab() -> None:
                 fn=on_mm_delete,
                 inputs=[mm_delete_target_tb, filter_radio],
                 outputs=[model_list_html, mm_status_text, _all_models_state],
+            )
+
+            # ------------------------------------------------------------------
+            # Edit Modal
+            # ------------------------------------------------------------------
+            with gr.Group(visible=False, elem_id="edit-modal-group") as edit_modal:
+                gr.Markdown("### ✏️ Edit Model Metadata")
+                
+                edit_filename_state = gr.State(value="")
+                edit_file_display = gr.Textbox(
+                    label="File",
+                    interactive=False,
+                    value="",
+                )
+                edit_name = gr.Textbox(
+                    label="Display Name",
+                    placeholder="My LoRA Name",
+                )
+                edit_triggers = gr.Textbox(
+                    label="Trigger Words",
+                    info="Comma-separated list",
+                    placeholder="trigger1, trigger2, trigger3",
+                )
+                edit_weight = gr.Number(
+                    label="Default Weight",
+                    value=1.0,
+                    minimum=0.0,
+                    maximum=2.0,
+                    step=0.05,
+                )
+                edit_clip_skip = gr.Slider(
+                    label="CLIP Skip",
+                    info="0 = disabled, 1-12 = layers to skip",
+                    minimum=0,
+                    maximum=12,
+                    step=1,
+                    value=0,
+                )
+                edit_description = gr.Textbox(
+                    label="Description",
+                    lines=2,
+                    placeholder="Optional description...",
+                )
+                
+                with gr.Row():
+                    edit_cancel_btn = gr.Button("Cancel", variant="secondary")
+                    edit_save_btn = gr.Button("💾 Save Changes", variant="primary")
+                
+                edit_feedback = gr.HTML(value="")
+
+            # ------------------------------------------------------------------
+            # Edit handler: Load model data when edit button clicked
+            # ------------------------------------------------------------------
+            def on_edit_target_change(edit_target: str, all_models: List[Dict]):
+                """Load model data into edit form when user clicks Edit."""
+                if not edit_target:
+                    return {
+                        edit_modal: gr.Group(visible=False),
+                        edit_filename_state: "",
+                        edit_file_display: "",
+                        edit_name: "",
+                        edit_triggers: "",
+                        edit_weight: 1.0,
+                        edit_clip_skip: 0,
+                        edit_description: "",
+                        edit_feedback: "",
+                    }
+                
+                filename, model_type = edit_target.split("|")
+                
+                # Find model in cached list
+                model = next((m for m in all_models if m["filename"] == filename), None)
+                
+                if not model:
+                    # Try to fetch from backend
+                    try:
+                        from src.services.download import DownloadService  # noqa: PLC0415
+                        models = DownloadService().list_user_models.remote()
+                        model = next((m for m in models if m["filename"] == filename), None)
+                    except Exception:  # noqa: BLE001
+                        pass
+                
+                if not model:
+                    return {
+                        edit_modal: gr.Group(visible=False),
+                        edit_filename_state: "",
+                        edit_file_display: "",
+                        edit_name: "",
+                        edit_triggers: "",
+                        edit_weight: 1.0,
+                        edit_clip_skip: 0,
+                        edit_description: "",
+                        edit_feedback: "<span style='color:#f88;'>❌ Model not found</span>",
+                    }
+                
+                triggers = ", ".join(model.get("trigger_words", []))
+                
+                return {
+                    edit_modal: gr.Group(visible=True),
+                    edit_filename_state: filename,
+                    edit_file_display: filename,
+                    edit_name: model.get("name", ""),
+                    edit_triggers: triggers,
+                    edit_weight: model.get("default_weight", 1.0),
+                    edit_clip_skip: model.get("clip_skip", 0),
+                    edit_description: model.get("description", ""),
+                    edit_feedback: "",
+                }
+
+            mm_edit_target_tb.change(
+                fn=on_edit_target_change,
+                inputs=[mm_edit_target_tb, _all_models_state],
+                outputs=[
+                    edit_modal,
+                    edit_filename_state,
+                    edit_file_display,
+                    edit_name,
+                    edit_triggers,
+                    edit_weight,
+                    edit_clip_skip,
+                    edit_description,
+                    edit_feedback,
+                ],
+            )
+
+            # ------------------------------------------------------------------
+            # Edit save handler
+            # ------------------------------------------------------------------
+            def on_edit_save(
+                filename: str,
+                name: str,
+                triggers: str,
+                weight: float,
+                clip_skip: int,
+                description: str,
+                filter_val: str,
+            ):
+                """Save edited metadata."""
+                if not filename:
+                    return {
+                        edit_feedback: "<span style='color:#f88;'>❌ No model selected</span>",
+                        model_list_html: gr.update(),
+                        mm_status_text: "",
+                        _all_models_state: gr.update(),
+                    }
+                
+                # Parse triggers
+                trigger_list = [t.strip() for t in triggers.split(",") if t.strip()]
+                
+                # Call backend
+                try:
+                    from src.services.download import DownloadService  # noqa: PLC0415
+                    result = DownloadService().update_model_metadata.remote(
+                        filename=filename,
+                        updates={
+                            "name": name,
+                            "trigger_words": trigger_list,
+                            "default_weight": weight,
+                            "clip_skip": clip_skip,
+                            "description": description,
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("update_model_metadata error")
+                    return {
+                        edit_feedback: f"<span style='color:#f88;'>❌ Error: {exc}</span>",
+                        model_list_html: gr.update(),
+                        mm_status_text: "",
+                        _all_models_state: gr.update(),
+                    }
+                
+                if result.get("success"):
+                    # Refresh model list
+                    try:
+                        from src.services.download import DownloadService  # noqa: PLC0415
+                        models = DownloadService().list_user_models.remote()
+                    except Exception:  # noqa: BLE001
+                        models = []
+                    html = _build_model_list_html(models, filter_val)
+                    return {
+                        edit_feedback: "<span style='color:#4CAF50;'>✓ Saved successfully</span>",
+                        model_list_html: html,
+                        mm_status_text: f"✅ Updated: {filename}",
+                        _all_models_state: models,
+                    }
+                else:
+                    return {
+                        edit_feedback: f"<span style='color:#f88;'>❌ {result.get('error', 'Unknown error')}</span>",
+                        model_list_html: gr.update(),
+                        mm_status_text: "",
+                        _all_models_state: gr.update(),
+                    }
+
+            edit_save_btn.click(
+                fn=on_edit_save,
+                inputs=[
+                    edit_filename_state,
+                    edit_name,
+                    edit_triggers,
+                    edit_weight,
+                    edit_clip_skip,
+                    edit_description,
+                    filter_radio,
+                ],
+                outputs=[edit_feedback, model_list_html, mm_status_text, _all_models_state],
+            )
+
+            # ------------------------------------------------------------------
+            # Edit cancel handler
+            # ------------------------------------------------------------------
+            def on_edit_cancel():
+                """Close edit modal without saving."""
+                return {
+                    edit_modal: gr.Group(visible=False),
+                    edit_filename_state: "",
+                    edit_feedback: "",
+                }
+
+            edit_cancel_btn.click(
+                fn=on_edit_cancel,
+                inputs=[],
+                outputs=[edit_modal, edit_filename_state, edit_feedback],
             )
 
         # ----------------------------------------------------------------

@@ -43,6 +43,9 @@ class ModelInfo:
     # File info
     size_bytes: int = 0
 
+    # Generation settings
+    clip_skip: int = 0                     # 0 = disabled, 1-12 = layers to skip
+
 
 class ModelMetadataManager:
     """CRUD operations on .metadata.json stored on the LoRA volume."""

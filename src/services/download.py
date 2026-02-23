@@ -677,6 +677,8 @@ class DownloadService:
                 "trigger_words": m.trigger_words,
                 "base_model": m.base_model,
                 "default_weight": m.default_weight,
+                "clip_skip": m.clip_skip,
+                "description": m.description,
                 "civitai_model_id": m.civitai_model_id,
                 "tags": m.tags,
                 "size_bytes": m.size_bytes,
@@ -704,9 +706,89 @@ class DownloadService:
                     "trigger_words": [],
                     "base_model": "",
                     "default_weight": 1.0,
+                    "clip_skip": 0,
+                    "description": "",
                     "civitai_model_id": None,
                     "tags": [],
                     "size_bytes": os.path.getsize(fpath) if os.path.isfile(fpath) else 0,
                 })
 
         return result
+
+    @modal.method()
+    def update_model_metadata(
+        self,
+        filename: str,
+        updates: dict,
+    ) -> dict:
+        """
+        Update metadata for an existing model.
+
+        Args:
+            filename: The model filename to update
+            updates: Dict with fields to update, e.g.:
+                {
+                    "name": "New Display Name",
+                    "trigger_words": ["trigger1", "trigger2"],
+                    "clip_skip": 2,
+                    "default_weight": 0.8,
+                    "description": "A description",
+                }
+
+        Returns:
+            {"success": bool, "model_info": dict | None, "error": str | None}
+        """
+        from src.app_config import lora_volume  # noqa: F811
+        from dataclasses import asdict
+
+        mgr = ModelMetadataManager(LORAS_MOUNT_PATH)
+
+        # Get existing metadata
+        existing = mgr.get_model(filename)
+        if existing is None:
+            return {
+                "success": False,
+                "model_info": None,
+                "error": f"Model not found: {filename}",
+            }
+
+        # Apply updates (only allowed fields)
+        allowed_fields = {
+            "name", "trigger_words", "clip_skip",
+            "default_weight", "description", "tags",
+            "recommended_weight_min", "recommended_weight_max",
+        }
+
+        updated = asdict(existing)
+        for key, value in updates.items():
+            if key in allowed_fields:
+                updated[key] = value
+
+        # Validate
+        if updated.get("clip_skip", 0) not in range(0, 13):
+            return {
+                "success": False,
+                "model_info": None,
+                "error": "clip_skip must be 0-12",
+            }
+
+        weight = updated.get("default_weight", 1.0)
+        if not isinstance(weight, (int, float)) or weight < 0.0 or weight > 2.0:
+            return {
+                "success": False,
+                "model_info": None,
+                "error": "default_weight must be a number between 0.0 and 2.0",
+            }
+
+        # Save
+        new_info = ModelInfo(**updated)
+        mgr.add_model(new_info)
+        lora_volume.commit()
+
+        logger.info("Updated metadata for %s: %s", filename, updates)
+
+        return {
+            "success": True,
+            "model_info": updated,
+            "error": None,
+        }
