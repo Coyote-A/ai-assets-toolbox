@@ -80,12 +80,12 @@ class ModelEntry:
 ALL_MODELS: list[ModelEntry] = [
     ModelEntry(
         key="illustrious-xl",
-        repo_id="OnomaAIResearch/Illustrious-xl-early-release-v0",
-        filename="Illustrious-XL-v0.1.safetensors",
+        repo_id="OnomaAIResearch/Illustrious-XL-v2.0",
+        filename="Illustrious-XL-v2.0.safetensors",
         subfolder=None,
         local_dir="illustrious-xl",
         size_bytes=6_938_000_000,
-        description="Illustrious-XL v0.1 (base SDXL model)",
+        description="Illustrious-XL v2.0 (base SDXL model)",
         service="upscale",
     ),
     ModelEntry(
@@ -161,6 +161,65 @@ def get_model_path(key: str) -> str:
     """Return the absolute path to *key*'s directory on the models volume."""
     entry = get_model(key)
     return f"{MODELS_MOUNT_PATH}/{entry.local_dir}"
+
+
+def check_model_files_exist(key: str) -> bool:
+    """Check if the model's files actually exist on the volume.
+    
+    For single-file models (filename is set), checks if that specific file exists.
+    For full-repo or subfolder models, checks if the directory exists and is non-empty.
+    
+    Returns:
+        True if the model files appear to be present, False otherwise.
+    """
+    entry = get_model(key)
+    model_dir = f"{MODELS_MOUNT_PATH}/{entry.local_dir}"
+    
+    if not os.path.isdir(model_dir):
+        return False
+    
+    if entry.filename is not None:
+        # Single-file model: check for the specific file
+        # First check the flattened location (expected after download)
+        file_path = os.path.join(model_dir, entry.filename)
+        if os.path.isfile(file_path):
+            return True
+        # Also check in the subfolder if one was specified (pre-flattened location)
+        if entry.subfolder:
+            nested_path = os.path.join(model_dir, entry.subfolder, entry.filename)
+            if os.path.isfile(nested_path):
+                return True
+        return False
+    else:
+        # Full repo or subfolder: check directory is non-empty
+        return len(os.listdir(model_dir)) > 0
+
+
+def get_model_file_path(key: str) -> str | None:
+    """Return the absolute path to a single-file model's file, or None if not found.
+    
+    For models with a filename, searches both the flattened location and the
+    original subfolder location. Returns None for full-repo models or if the
+    file is not found.
+    """
+    entry = get_model(key)
+    if entry.filename is None:
+        return None
+    
+    model_dir = f"{MODELS_MOUNT_PATH}/{entry.local_dir}"
+    
+    # Check flattened location first
+    flat_path = os.path.join(model_dir, entry.filename)
+    if os.path.isfile(flat_path):
+        return flat_path
+    
+    # Check in subfolder if specified
+    if entry.subfolder:
+        nested_path = os.path.join(model_dir, entry.subfolder, entry.filename)
+        if os.path.isfile(nested_path):
+            return nested_path
+    
+    return None
 
 
 # ---------------------------------------------------------------------------

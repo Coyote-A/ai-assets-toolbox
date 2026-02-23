@@ -59,6 +59,8 @@ from src.services.model_metadata import ModelMetadataManager, ModelInfo
 from src.services.model_registry import (
     LORAS_MOUNT_PATH,
     MODELS_MOUNT_PATH,
+    check_model_files_exist,
+    get_model_file_path,
     get_model_path,
 )
 
@@ -168,7 +170,7 @@ class UpscaleService:
             "ip-adapter",
             "clip-vit-h",
         ]
-        missing = [k for k in required_models if not os.path.exists(get_model_path(k))]
+        missing = [k for k in required_models if not check_model_files_exist(k)]
         if missing:
             logger.warning(
                 "Missing models: %s — run setup wizard first", missing
@@ -187,15 +189,20 @@ class UpscaleService:
 
         # The Illustrious-XL model is a single safetensors file downloaded via
         # hf_hub_download into the local_dir.  The registry records the filename
-        # as "Illustrious-XL-v0.1.safetensors".
-        illustrious_xl_path = os.path.join(
-            illustrious_xl_dir, "Illustrious-XL-v0.1.safetensors"
-        )
+        # as "Illustrious-XL-v2.0.safetensors".
+        illustrious_xl_path = get_model_file_path("illustrious-xl")
+        if illustrious_xl_path is None:
+            illustrious_xl_path = os.path.join(
+                illustrious_xl_dir, "Illustrious-XL-v2.0.safetensors"
+            )
 
-        # The IP-Adapter weight file lives inside the ip-adapter directory.
-        ip_adapter_path = os.path.join(
-            ip_adapter_dir, "ip-adapter-plus_sdxl_vit-h.safetensors"
-        )
+        # The IP-Adapter weight file may be in the flattened location or still
+        # in the sdxl_models subfolder (depending on download version).
+        ip_adapter_path = get_model_file_path("ip-adapter")
+        if ip_adapter_path is None:
+            ip_adapter_path = os.path.join(
+                ip_adapter_dir, "ip-adapter-plus_sdxl_vit-h.safetensors"
+            )
 
         # ------------------------------------------------------------------
         # 1. Load VAE fp16-fix
@@ -992,10 +999,27 @@ class UpscaleService:
             return
 
         # Fallback: startup load failed — attempt to load now.
-        ip_adapter_dir = get_model_path("ip-adapter")
-        ip_adapter_path = os.path.join(
-            ip_adapter_dir, "ip-adapter-plus_sdxl_vit-h.safetensors"
-        )
+        # First check if the model files actually exist.
+        if not check_model_files_exist("ip-adapter"):
+            logger.warning(
+                "IP-Adapter model file not found — run setup wizard to download it. "
+                "Proceeding without IP-Adapter."
+            )
+            return
+        if not check_model_files_exist("clip-vit-h"):
+            logger.warning(
+                "CLIP ViT-H model not found — run setup wizard to download it. "
+                "Proceeding without IP-Adapter."
+            )
+            return
+
+        # Find the IP-Adapter file (may be in flattened or subfolder location)
+        ip_adapter_path = get_model_file_path("ip-adapter")
+        if ip_adapter_path is None:
+            ip_adapter_dir = get_model_path("ip-adapter")
+            ip_adapter_path = os.path.join(
+                ip_adapter_dir, "ip-adapter-plus_sdxl_vit-h.safetensors"
+            )
         clip_vit_h_path = get_model_path("clip-vit-h")
 
         logger.info(
