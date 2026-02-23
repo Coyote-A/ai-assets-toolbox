@@ -4,11 +4,13 @@ Centralized model registry for the AI Assets Toolbox.
 Defines all models required by the app, their HuggingFace sources, local
 storage paths under the models volume, and helper utilities for manifest
 tracking (which models have been downloaded to the volume).
+
+Metadata is now stored in Modal Dict (via MetadataStore) instead of JSON files,
+providing faster access and automatic synchronization across containers.
 """
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 
@@ -23,11 +25,11 @@ LORAS_VOLUME_NAME = "ai-toolbox-loras"
 LORAS_MOUNT_PATH = "/vol/loras"
 
 # ---------------------------------------------------------------------------
-# Manifest / progress file names (stored at the root of the models volume)
+# Manifest / progress file names (legacy - kept for migration reference)
 # ---------------------------------------------------------------------------
 
-MANIFEST_FILE = ".manifest.json"   # tracks which models are downloaded
-PROGRESS_FILE = ".progress.json"   # tracks download progress
+MANIFEST_FILE = ".manifest.json"   # tracks which models are downloaded (legacy)
+PROGRESS_FILE = ".progress.json"   # tracks download progress (legacy)
 
 
 # ---------------------------------------------------------------------------
@@ -223,55 +225,57 @@ def get_model_file_path(key: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Manifest helpers
+# Manifest helpers (using MetadataStore)
 # ---------------------------------------------------------------------------
 
 def read_manifest(volume_path: str = MODELS_MOUNT_PATH) -> dict:
     """
-    Read the download manifest from *volume_path*.
+    Read the download manifest from Modal Dict.
 
-    Returns an empty dict if the manifest file does not exist yet.
+    The *volume_path* parameter is ignored (kept for backward compatibility).
+    Returns an empty dict if no manifest exists yet.
     """
-    manifest_path = os.path.join(volume_path, MANIFEST_FILE)
-    try:
-        with open(manifest_path, "r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except FileNotFoundError:
-        return {}
+    from src.services.metadata_store import MetadataStore
+    return MetadataStore().get_manifest()
 
 
 def write_manifest(manifest: dict, volume_path: str = MODELS_MOUNT_PATH) -> None:
-    """Write *manifest* as JSON to *volume_path*."""
-    manifest_path = os.path.join(volume_path, MANIFEST_FILE)
-    os.makedirs(volume_path, exist_ok=True)
-    with open(manifest_path, "w", encoding="utf-8") as fh:
-        json.dump(manifest, fh, indent=2)
+    """Write *manifest* to Modal Dict.
+
+    The *volume_path* parameter is ignored (kept for backward compatibility).
+    """
+    from src.services.metadata_store import MetadataStore
+    MetadataStore().set_manifest(manifest)
 
 
 def is_model_downloaded(key: str, volume_path: str = MODELS_MOUNT_PATH) -> bool:
     """Return ``True`` if *key* is recorded as downloaded in the manifest
-    **and** the manifest's ``repo_id`` matches the current registry entry.
+    **and** the manifest's ``repo_id`` matches the current registry entry
+    **and** the files actually exist on disk.
+
+    This performs a two-stage validation:
+    1. Check the manifest entry in Modal Dict has correct repo_id
+    2. Verify files exist on the volume (defense in depth)
 
     If the ``repo_id`` stored in the manifest differs from the registry (e.g.
     the model was switched from Qwen2.5-VL to Qwen3-VL), the cached weights
     are considered stale and the function returns ``False``.
     """
-    manifest = read_manifest(volume_path)
-    entry_data = manifest.get(key, {})
-    if not entry_data.get("completed", False) and not entry_data.get("downloaded", False):
-        return False
-    # Verify repo_id matches the current registry entry.
-    # If the manifest entry has no repo_id (written before repo_id tracking was
-    # added) we treat it as stale so the weights are re-downloaded with the
-    # correct repo.
+    from src.services.metadata_store import MetadataStore
+    
     try:
         registry_entry = get_model(key)
     except KeyError:
         return False
-    manifest_repo_id = entry_data.get("repo_id")
-    if manifest_repo_id != registry_entry.repo_id:
+    
+    # Check manifest entry in Modal Dict
+    store = MetadataStore()
+    if not store.is_model_downloaded(key, registry_entry.repo_id):
         return False
-    return True
+    
+    # Also verify files exist on disk (defense in depth)
+    # This handles edge cases like volume corruption or manual file deletion
+    return check_model_files_exist(key)
 
 
 def all_models_ready(volume_path: str = MODELS_MOUNT_PATH) -> bool:

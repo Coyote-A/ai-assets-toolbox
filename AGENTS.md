@@ -29,8 +29,9 @@ Use this to verify model files exist before assuming download issues.
 
 ## Critical Patterns
 - **Image imports** — All Modal images need `.add_local_python_source("src")` for `from src.xxx` imports to work inside containers.
+- **Metadata storage** — Model manifest and download progress stored in `modal.Dict.from_name("ai-toolbox-model-metadata")` via `MetadataStore` class. No file I/O needed; Dict is always current across containers.
 - **Token persistence** — Uses `modal.Dict.from_name("ai-toolbox-tokens")` because Gradio's BrowserState rotates encryption keys on restart.
-- **Model manifest** — Download progress tracked in `.progress.json`, completion in `.manifest.json` at volume root. Use `is_model_downloaded()` to check before assuming weights exist.
+- **Model validation** — `is_model_downloaded()` checks both the manifest entry in Dict AND file existence on volume (defense in depth).
 - **LoRA paths** — Two paths exist: `/vol/loras` (mount point) and `/vol/loras/loras` (subdirectory for actual files). Check `LORAS_DIR` vs `LORAS_SUBDIR` in `src/gpu/upscale.py`.
 - **Model file locations** — Single-file models (like IP-Adapter) may be in flattened location (`ip-adapter/file.safetensors`) OR still in subfolder (`ip-adapter/sdxl_models/file.safetensors`). Always use `get_model_file_path()` to find the actual file location, not hardcoded paths.
 

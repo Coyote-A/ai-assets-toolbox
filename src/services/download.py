@@ -2,8 +2,8 @@
 Download service for the AI Assets Toolbox setup wizard.
 
 A CPU-only Modal class that downloads model weights from HuggingFace (and
-LoRAs from CivitAI) to the shared Modal Volumes, tracking progress in
-``.progress.json`` and completion in ``.manifest.json``.
+LoRAs from CivitAI) to the shared Modal Volumes, tracking progress and
+completion in Modal Dict via MetadataStore.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Internal helpers (using MetadataStore)
 # ---------------------------------------------------------------------------
 
 def _write_progress(
@@ -46,39 +46,21 @@ def _write_progress(
     percentage: float | None = None,
     error: str | None = None,
 ) -> None:
-    """Persist a progress entry for *model_key* to ``.progress.json``."""
-    progress_path = os.path.join(volume_path, PROGRESS_FILE)
-    try:
-        if os.path.exists(progress_path):
-            with open(progress_path, encoding="utf-8") as fh:
-                progress = json.load(fh)
-        else:
-            progress = {}
-    except (OSError, json.JSONDecodeError):
-        progress = {}
-
-    entry: dict = {"status": status}
-    if percentage is not None:
-        entry["percentage"] = round(percentage, 1)
-    if error is not None:
-        entry["error"] = error
-
-    progress[model_key] = entry
-
-    os.makedirs(volume_path, exist_ok=True)
-    with open(progress_path, "w", encoding="utf-8") as fh:
-        json.dump(progress, fh, indent=2)
+    """Update progress for *model_key* in Modal Dict via MetadataStore.
+    
+    The *volume_path* parameter is ignored (kept for backward compatibility).
+    """
+    from src.services.metadata_store import MetadataStore
+    MetadataStore().set_model_progress(model_key, status, percentage, error)
 
 
 def _mark_complete(volume_path: str, model_key: str, repo_id: str) -> None:
-    """Record *model_key* as fully downloaded in ``.manifest.json``."""
-    manifest = read_manifest(volume_path)
-    manifest[model_key] = {
-        "completed": True,
-        "repo_id": repo_id,
-        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-    }
-    write_manifest(manifest, volume_path)
+    """Record *model_key* as fully downloaded in Modal Dict via MetadataStore.
+    
+    The *volume_path* parameter is ignored (kept for backward compatibility).
+    """
+    from src.services.metadata_store import MetadataStore
+    MetadataStore().mark_complete(model_key, repo_id)
 
 
 def _download_hf_model(entry: ModelEntry, hf_token: str | None) -> None:
@@ -198,8 +180,8 @@ class DownloadService:
                 ...
             }
         """
-        models_volume.reload()
-        manifest = read_manifest(MODELS_MOUNT_PATH)
+        from src.services.metadata_store import MetadataStore
+        store = MetadataStore()
         result: dict = {}
         for entry in ALL_MODELS:
             result[entry.key] = {
@@ -212,16 +194,12 @@ class DownloadService:
     @modal.method()
     def get_progress(self) -> dict:
         """
-        Return the current contents of ``.progress.json``.
+        Return the current download progress from Modal Dict.
 
         Returns an empty dict if no download has been started yet.
         """
-        models_volume.reload()
-        progress_path = os.path.join(MODELS_MOUNT_PATH, PROGRESS_FILE)
-        if os.path.exists(progress_path):
-            with open(progress_path, encoding="utf-8") as fh:
-                return json.load(fh)
-        return {}
+        from src.services.metadata_store import MetadataStore
+        return MetadataStore().get_progress()
 
     # ------------------------------------------------------------------
     # Single-model download
@@ -232,31 +210,31 @@ class DownloadService:
         """
         Download the model identified by *key* from HuggingFace.
 
-        Progress is written to ``.progress.json`` (status: ``"downloading"``
+        Progress is tracked in Modal Dict (status: ``"downloading"``
         while in flight, ``"completed"`` on success, ``"error"`` on failure).
         On success the manifest is updated and the volume is committed.
 
         Returns a dict with ``{"status": "completed"|"already_complete"|"error"}``.
         """
-        # Reload volume to see latest state from other containers
-        models_volume.reload()
-
+        from src.services.metadata_store import MetadataStore
+        store = MetadataStore()
+        
         try:
             entry = get_model(key)
         except KeyError:
             logger.error("Unknown model key: %r", key)
             return {"status": "error", "error": f"Unknown model key: {key!r}"}
 
-        manifest = read_manifest(MODELS_MOUNT_PATH)
-        if key in manifest and manifest[key].get("completed", False):
-            # Check if the repo_id in the manifest matches the registry.
-            # If they differ the cached weights are stale (e.g. model was
-            # switched from Qwen2.5-VL to Qwen3-VL) and must be replaced.
-            manifest_repo_id = manifest[key].get("repo_id")
-            if manifest_repo_id == entry.repo_id:
-                logger.info("Model %r already downloaded — skipping.", key)
-                return {"status": "already_complete"}
-            else:
+        # Check if already downloaded using MetadataStore
+        if store.is_model_downloaded(key, entry.repo_id):
+            logger.info("Model %r already downloaded — skipping.", key)
+            return {"status": "already_complete"}
+        
+        # Check for stale entry with wrong repo_id
+        model_entry = store.get_model_entry(key)
+        if model_entry and model_entry.get("completed", False):
+            manifest_repo_id = model_entry.get("repo_id")
+            if manifest_repo_id != entry.repo_id:
                 logger.warning(
                     "Model %r repo_id mismatch: manifest has %r, registry has %r — "
                     "deleting stale weights and re-downloading.",
@@ -270,13 +248,9 @@ class DownloadService:
                     shutil.rmtree(old_model_dir)
                     logger.info("Deleted stale model directory: %s", old_model_dir)
                 # Remove stale manifest entry
-                del manifest[key]
-                write_manifest(manifest, MODELS_MOUNT_PATH)
-                # Commit the deletion so other containers see the clean state,
-                # then reload to confirm the volume is consistent before we
-                # start writing new files.
+                store.remove_model_entry(key)
+                # Commit the deletion so other containers see the clean state
                 models_volume.commit()
-                models_volume.reload()
 
         logger.info("Starting download for model %r (%s)", key, entry.description)
         _write_progress(MODELS_MOUNT_PATH, key, "downloading", percentage=0.0)
@@ -314,12 +288,11 @@ class DownloadService:
             hf_token: HuggingFace API token for gated models.
             civitai_token: CivitAI API token for NSFW/early-access models.
         """
-        manifest = read_manifest(MODELS_MOUNT_PATH)
+        from src.services.metadata_store import MetadataStore
+        store = MetadataStore()
+        
         for entry in ALL_MODELS:
-            if not (
-                entry.key in manifest
-                and manifest[entry.key].get("completed", False)
-            ):
+            if not store.is_model_downloaded(entry.key, entry.repo_id):
                 self.download_model.local(entry.key, hf_token)
         return self.check_status.local()
 
@@ -332,6 +305,8 @@ class DownloadService:
         """Delete a model from the volume and remove it from the manifest.
         Used when a model needs to be re-downloaded (e.g., wrong version).
         """
+        from src.services.metadata_store import MetadataStore
+        
         entry = get_model(key)
         model_dir = os.path.join(MODELS_MOUNT_PATH, entry.local_dir)
 
@@ -340,24 +315,14 @@ class DownloadService:
             shutil.rmtree(model_dir)
             logger.info("Deleted model directory: %s", model_dir)
 
-        # Remove from manifest
-        manifest = read_manifest(MODELS_MOUNT_PATH)
-        if key in manifest:
-            del manifest[key]
-            write_manifest(manifest, MODELS_MOUNT_PATH)
-            logger.info("Removed '%s' from manifest", key)
+        # Remove from manifest using MetadataStore
+        store = MetadataStore()
+        store.remove_model_entry(key)
+        logger.info("Removed '%s' from manifest", key)
 
-        # Remove from progress
-        progress_path = os.path.join(MODELS_MOUNT_PATH, PROGRESS_FILE)
-        if os.path.exists(progress_path):
-            with open(progress_path) as f:
-                progress = json.load(f)
-            if key in progress:
-                del progress[key]
-                with open(progress_path, "w") as f:
-                    json.dump(progress, f, indent=2)
+        # Clear progress using MetadataStore
+        store.clear_progress(key)
 
-        from src.app_config import models_volume
         models_volume.commit()
 
         return self.check_status()
