@@ -210,7 +210,7 @@ class UpscaleService:
         logger.info("Loading SDXL VAE fp16-fix from '%s'", sdxl_vae_path)
         vae = AutoencoderKL.from_pretrained(
             sdxl_vae_path,
-            torch_dtype=torch.float16,
+            dtype=torch.float16,
             local_files_only=True,
         )
         logger.info("VAE loaded")
@@ -221,7 +221,7 @@ class UpscaleService:
         logger.info("Loading ControlNet Tile from '%s'", controlnet_tile_path)
         controlnet = ControlNetModel.from_pretrained(
             controlnet_tile_path,
-            torch_dtype=torch.float16,
+            dtype=torch.float16,
             local_files_only=True,
         )
         logger.info("ControlNet loaded")
@@ -233,7 +233,7 @@ class UpscaleService:
         logger.info("Loading SDXL base pipeline from '%s'", illustrious_xl_path)
         base_pipe = StableDiffusionXLImg2ImgPipeline.from_single_file(
             illustrious_xl_path,
-            torch_dtype=torch.float16,
+            dtype=torch.float16,
             use_safetensors=True,
             vae=vae,
         )
@@ -1237,7 +1237,7 @@ def _build_compel(pipe: Any) -> Optional[Any]:
     required tokenizer/encoder attributes.
     """
     try:
-        from compel import Compel, ReturnedEmbeddingsType
+        from compel import CompelForSDXL
 
         if not (
             hasattr(pipe, "tokenizer")
@@ -1252,14 +1252,8 @@ def _build_compel(pipe: Any) -> Optional[Any]:
 
         # Get device from text encoder to ensure tensors are on the same device
         device = next(pipe.text_encoder.parameters()).device
-        compel = Compel(
-            tokenizer=[pipe.tokenizer, pipe.tokenizer_2],
-            text_encoder=[pipe.text_encoder, pipe.text_encoder_2],
-            returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
-            requires_pooled=[False, True],
-            device=device,
-        )
-        logger.info("Compel long-prompt encoder initialised on device: %s", device)
+        compel = CompelForSDXL(pipe, device=device)
+        logger.info("CompelForSDXL long-prompt encoder initialised on device: %s", device)
         return compel
     except ImportError:
         logger.warning(
@@ -1285,12 +1279,15 @@ def _encode_prompt_with_compel(
         Returns ``(None, None, None, None)`` on failure.
     """
     try:
-        conditioning, pooled = compel(prompt)
-        neg_conditioning, neg_pooled = compel(negative_prompt)
-        [conditioning, neg_conditioning] = compel.pad_conditioning_tensors_to_same_length(
-            [conditioning, neg_conditioning]
+        # CompelForSDXL returns a LabelledConditioning dataclass with:
+        # embeds, pooled_embeds, negative_embeds, negative_pooled_embeds
+        labelled = compel(prompt, negative_prompt=negative_prompt)
+        return (
+            labelled.embeds,
+            labelled.pooled_embeds,
+            labelled.negative_embeds,
+            labelled.negative_pooled_embeds,
         )
-        return conditioning, pooled, neg_conditioning, neg_pooled
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning(
             "compel encoding failed: %s — falling back to raw prompt strings", exc
