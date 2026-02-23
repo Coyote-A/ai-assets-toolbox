@@ -139,3 +139,14 @@ lora_volume = modal.Volume.from_name(LORAS_VOLUME_NAME, create_if_missing=True)
 # uses encryption keys that rotate on server restart.
 
 token_store = modal.Dict.from_name("ai-toolbox-tokens", create_if_missing=True)
+
+# ---------------------------------------------------------------------------
+# Metadata extraction cache (Modal Dict for LLM response caching)
+# ---------------------------------------------------------------------------
+# Caches extracted metadata from model descriptions to avoid repeated LLM calls.
+# Keyed by SHA256 hash of description text. Values are JSON dicts with
+# extracted fields: trigger_words, recommended_weight, clip_skip, tags, usage_notes.
+
+metadata_extraction_cache = modal.Dict.from_name(
+    "ai-toolbox-metadata-cache", create_if_missing=True
+)

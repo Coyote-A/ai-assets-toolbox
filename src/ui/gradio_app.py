@@ -2327,9 +2327,17 @@ def _build_model_manager_tab() -> None:
                 )
                 edit_description = gr.Textbox(
                     label="Description",
-                    lines=2,
-                    placeholder="Optional description...",
+                    lines=4,
+                    placeholder="Paste model description or readme...",
                 )
+                
+                # Auto-fill button for LLM metadata extraction
+                auto_fill_btn = gr.Button(
+                    "🤖 Auto-fill from description",
+                    variant="secondary",
+                    size="sm",
+                )
+                auto_fill_status = gr.HTML(value="")
                 
                 with gr.Row():
                     edit_cancel_btn = gr.Button("Cancel", variant="secondary")
@@ -2509,6 +2517,114 @@ def _build_model_manager_tab() -> None:
                 fn=on_edit_cancel,
                 inputs=[],
                 outputs=[edit_modal, edit_filename_state, edit_feedback],
+            )
+
+            # ------------------------------------------------------------------
+            # Auto-fill from description handler
+            # ------------------------------------------------------------------
+            def on_auto_fill_from_description(
+                description: str,
+                model_name: str,
+                current_triggers: str,
+                current_weight: float,
+                current_clip_skip: int,
+            ):
+                """
+                Call LLM to extract metadata from description and fill form fields.
+                
+                Only fills fields that are currently empty/default to avoid
+                overwriting user input.
+                """
+                if not description or not description.strip():
+                    return {
+                        edit_triggers: gr.update(),
+                        edit_weight: gr.update(),
+                        edit_clip_skip: gr.update(),
+                        auto_fill_status: "<span style='color:#f88;'>⚠️ No description to parse</span>",
+                    }
+                
+                try:
+                    from src.gpu.caption import CaptionService  # noqa: PLC0415
+                    
+                    result = CaptionService().extract_metadata.remote(
+                        description=description,
+                        model_name=model_name or "unknown",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("Auto-fill extraction failed")
+                    return {
+                        edit_triggers: gr.update(),
+                        edit_weight: gr.update(),
+                        edit_clip_skip: gr.update(),
+                        auto_fill_status: f"<span style='color:#f88;'>❌ Error: {exc}</span>",
+                    }
+                
+                if not result:
+                    return {
+                        edit_triggers: gr.update(),
+                        edit_weight: gr.update(),
+                        edit_clip_skip: gr.update(),
+                        auto_fill_status: "<span style='color:#f88;'>⚠️ Could not extract metadata</span>",
+                    }
+                
+                updates = {}
+                status_parts = []
+                
+                # Trigger words - only fill if currently empty
+                trigger_words = result.get("trigger_words", [])
+                if trigger_words and not current_triggers.strip():
+                    updates[edit_triggers] = ", ".join(trigger_words)
+                    status_parts.append(f"triggers: {len(trigger_words)}")
+                
+                # Weight - handle both single value and range
+                weight = result.get("recommended_weight")
+                weight_min = result.get("recommended_weight_min")
+                weight_max = result.get("recommended_weight_max")
+                
+                # Only fill weight if currently at default (1.0)
+                if current_weight == 1.0:
+                    if weight is not None:
+                        updates[edit_weight] = weight
+                        status_parts.append(f"weight: {weight}")
+                    elif weight_min is not None:
+                        # Use minimum of range as default
+                        updates[edit_weight] = weight_min
+                        status_parts.append(f"weight: {weight_min}-{weight_max}")
+                
+                # CLIP skip - only fill if currently 0 (disabled/default)
+                clip_skip = result.get("clip_skip")
+                if clip_skip is not None and current_clip_skip == 0:
+                    updates[edit_clip_skip] = clip_skip
+                    status_parts.append(f"CLIP skip: {clip_skip}")
+                
+                # Build status message
+                if status_parts:
+                    status_msg = f"<span style='color:#4CAF50;'>✓ Extracted: {', '.join(status_parts)}</span>"
+                else:
+                    status_msg = "<span style='color:#888;'>ℹ️ No new metadata found (fields may already be filled)</span>"
+                
+                updates[auto_fill_status] = status_msg
+                
+                # Fill in unchanged fields with gr.update()
+                if edit_triggers not in updates:
+                    updates[edit_triggers] = gr.update()
+                if edit_weight not in updates:
+                    updates[edit_weight] = gr.update()
+                if edit_clip_skip not in updates:
+                    updates[edit_clip_skip] = gr.update()
+                
+                return updates
+
+            auto_fill_btn.click(
+                fn=on_auto_fill_from_description,
+                inputs=[
+                    edit_description,
+                    edit_name,
+                    edit_triggers,
+                    edit_weight,
+                    edit_clip_skip,
+                ],
+                outputs=[edit_triggers, edit_weight, edit_clip_skip, auto_fill_status],
             )
 
         # ----------------------------------------------------------------

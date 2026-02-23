@@ -25,15 +25,17 @@ Public interface
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
 import os
+import re
 from typing import Optional
 
 import modal
 
-from src.app_config import app, caption_image, models_volume
+from src.app_config import app, caption_image, metadata_extraction_cache, models_volume
 from src.services.model_registry import MODELS_MOUNT_PATH, get_model_path
 
 # ---------------------------------------------------------------------------
@@ -56,6 +58,30 @@ DEFAULT_SYSTEM_PROMPT = (
     "NO duplicate words, NO consecutive commas, NO explanations, NO markdown. "
     "Example: pond, stones, green meadow, mushrooms, wildflowers, wooden fence"
 )
+
+# ---------------------------------------------------------------------------
+# Metadata extraction prompts
+# ---------------------------------------------------------------------------
+
+METADATA_EXTRACTION_SYSTEM_PROMPT = """You are a metadata extraction assistant for AI image generation models (LoRAs).
+Extract structured metadata from model descriptions. Be conservative - only extract information that is explicitly stated."""
+
+METADATA_EXTRACTION_USER_PROMPT = """Extract metadata from this model description. Return JSON with these fields:
+- trigger_words: list of strings (activation phrases, e.g. ["style of artist", "in the style of"])
+- recommended_weight: float or null (typical usage weight, e.g. 0.8)
+- recommended_weight_min: float or null (if a range is mentioned)
+- recommended_weight_max: float or null (if a range is mentioned)
+- clip_skip: int or null (if specified, usually 1-2)
+- tags: list of strings (style/category keywords)
+- usage_notes: string or null (any special instructions)
+
+Only include fields that are explicitly mentioned. Use null for missing values.
+
+Model: {model_name}
+Description:
+{description}
+
+Return only valid JSON, no other text."""
 
 # ---------------------------------------------------------------------------
 # CaptionService
@@ -473,3 +499,273 @@ class CaptionService:
             "model_path": model_path,
             "models_ready": getattr(self, "_models_ready", False),
         }
+
+    # ------------------------------------------------------------------
+    # Metadata extraction methods
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _cache_key(description: str) -> str:
+        """Generate cache key from description hash."""
+        return hashlib.sha256(description.encode()).hexdigest()[:16]
+
+    @staticmethod
+    def _parse_llm_json(response: str) -> dict:
+        """
+        Parse JSON from LLM response, handling markdown code blocks.
+
+        Tries multiple strategies:
+        1. Direct JSON parse
+        2. Extract from markdown code block (```json ... ```)
+        3. Find JSON object in text
+
+        Returns empty dict if all strategies fail.
+        """
+        # Try direct parse
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError:
+            pass
+
+        # Try extracting from markdown code block
+        json_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", response)
+        if json_match:
+            try:
+                return json.loads(json_match.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        # Try finding JSON object in text
+        json_match = re.search(r"\{[\s\S]*\}", response)
+        if json_match:
+            try:
+                return json.loads(json_match.group(0))
+            except json.JSONDecodeError:
+                pass
+
+        logger.warning("Failed to parse LLM response as JSON: %s", response[:200])
+        return {}
+
+    def _extract_text_only(
+        self,
+        text: str,
+        system_prompt: str,
+        max_new_tokens: int = 500,
+    ) -> str:
+        """
+        Run text-only inference (no image) using Qwen2.5-VL.
+
+        Qwen2.5-VL supports text-only input by omitting the image in the message.
+
+        Parameters
+        ----------
+        text:
+            The user prompt text.
+        system_prompt:
+            System instruction for the model.
+        max_new_tokens:
+            Maximum tokens to generate.
+
+        Returns
+        -------
+        str
+            Generated text response.
+        """
+        import torch
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": text},
+        ]
+
+        text_input = self._processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+        inputs = self._processor(
+            text=[text_input],
+            images=None,  # No images for text-only inference
+            return_tensors="pt",
+        )
+        inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            output_ids = self._model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+            )
+
+        input_token_len = inputs["input_ids"].shape[1]
+        generated_ids = output_ids[:, input_token_len:]
+        return self._processor.batch_decode(
+            generated_ids,
+            skip_special_tokens=True,
+        )[0].strip()
+
+    @modal.method()
+    def extract_metadata(
+        self,
+        description: str,
+        model_name: str = "unknown",
+    ) -> dict:
+        """
+        Extract structured metadata from a model description using LLM.
+
+        This method uses the Qwen2.5-VL model to parse model descriptions
+        (typically from CivitAI or HuggingFace) and extract structured metadata
+        like trigger words, recommended weights, CLIP skip, etc.
+
+        Results are cached in a Modal Dict to avoid repeated LLM calls for
+        the same description.
+
+        Parameters
+        ----------
+        description:
+            The model description text to parse.
+        model_name:
+            Optional model name for context (improves extraction quality).
+
+        Returns
+        -------
+        dict
+            Extracted metadata fields. Empty dict if extraction fails.
+            Fields may include:
+            - trigger_words: list of strings
+            - recommended_weight: float or None
+            - recommended_weight_min: float or None
+            - recommended_weight_max: float or None
+            - clip_skip: int or None
+            - tags: list of strings
+            - usage_notes: string or None
+
+        Raises
+        ------
+        RuntimeError
+            If models have not been downloaded yet.
+        """
+        if not getattr(self, "_models_ready", False):
+            raise RuntimeError(
+                "Models not downloaded. Please run the setup wizard first."
+            )
+
+        if not description or not description.strip():
+            return {}
+
+        # Check cache first
+        cache_key = self._cache_key(description)
+        try:
+            if cache_key in metadata_extraction_cache:
+                logger.info("Cache hit for metadata extraction: %s", cache_key)
+                return metadata_extraction_cache[cache_key]
+        except Exception as e:
+            logger.warning("Failed to check cache: %s", e)
+
+        # Build the prompt
+        user_prompt = METADATA_EXTRACTION_USER_PROMPT.format(
+            model_name=model_name,
+            description=description,
+        )
+
+        logger.info(
+            "Extracting metadata for model '%s' (description length: %d)",
+            model_name,
+            len(description),
+        )
+
+        # Run LLM extraction
+        try:
+            raw_response = self._extract_text_only(
+                text=user_prompt,
+                system_prompt=METADATA_EXTRACTION_SYSTEM_PROMPT,
+                max_new_tokens=500,
+            )
+            logger.info("LLM raw response: %s", raw_response[:200])
+
+            # Parse JSON response
+            result = self._parse_llm_json(raw_response)
+
+            if not result:
+                logger.warning("Empty result from LLM for description")
+                return {}
+
+            # Validate and clean the result
+            cleaned_result = self._validate_metadata_result(result)
+
+            # Cache the result
+            try:
+                metadata_extraction_cache[cache_key] = cleaned_result
+                logger.info("Cached metadata extraction result: %s", cache_key)
+            except Exception as e:
+                logger.warning("Failed to cache result: %s", e)
+
+            return cleaned_result
+
+        except Exception as e:
+            logger.error("Metadata extraction failed: %s", e)
+            return {}
+
+    def _validate_metadata_result(self, result: dict) -> dict:
+        """
+        Validate and clean the extracted metadata result.
+
+        Ensures fields have the correct types and removes invalid entries.
+        """
+        cleaned = {}
+
+        # trigger_words: should be a list of strings
+        if "trigger_words" in result and result["trigger_words"] is not None:
+            triggers = result["trigger_words"]
+            if isinstance(triggers, list):
+                cleaned["trigger_words"] = [
+                    str(t) for t in triggers if t is not None
+                ]
+            elif isinstance(triggers, str):
+                # Handle case where LLM returns a single string
+                cleaned["trigger_words"] = [triggers]
+
+        # recommended_weight: should be a float
+        if "recommended_weight" in result and result["recommended_weight"] is not None:
+            try:
+                weight = float(result["recommended_weight"])
+                if 0.0 <= weight <= 2.0:  # Sanity check
+                    cleaned["recommended_weight"] = weight
+            except (ValueError, TypeError):
+                pass
+
+        # recommended_weight_min/max: should be floats
+        for field in ["recommended_weight_min", "recommended_weight_max"]:
+            if field in result and result[field] is not None:
+                try:
+                    weight = float(result[field])
+                    if 0.0 <= weight <= 2.0:
+                        cleaned[field] = weight
+                except (ValueError, TypeError):
+                    pass
+
+        # clip_skip: should be an int (typically 1-2)
+        if "clip_skip" in result and result["clip_skip"] is not None:
+            try:
+                clip_skip = int(result["clip_skip"])
+                if 1 <= clip_skip <= 12:  # Sanity check
+                    cleaned["clip_skip"] = clip_skip
+            except (ValueError, TypeError):
+                pass
+
+        # tags: should be a list of strings
+        if "tags" in result and result["tags"] is not None:
+            tags = result["tags"]
+            if isinstance(tags, list):
+                cleaned["tags"] = [str(t) for t in tags if t is not None]
+            elif isinstance(tags, str):
+                cleaned["tags"] = [tags]
+
+        # usage_notes: should be a string
+        if "usage_notes" in result and result["usage_notes"] is not None:
+            notes = result["usage_notes"]
+            if isinstance(notes, str) and notes.strip():
+                cleaned["usage_notes"] = notes.strip()
+
+        return cleaned
