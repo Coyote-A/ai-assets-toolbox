@@ -472,6 +472,7 @@ class UpscaleService:
                 controlnet_enabled=controlnet_enabled,
                 controlnet_conditioning_scale=controlnet_conditioning_scale,
                 ip_adapter_image=ip_adapter_pil,
+                ip_adapter_loaded=self._ip_adapter_loaded,
                 target_width=target_width,
                 target_height=target_height,
             )
@@ -704,6 +705,7 @@ class UpscaleService:
                 controlnet_enabled=controlnet_enabled,
                 controlnet_conditioning_scale=controlnet_conditioning_scale,
                 ip_adapter_image=ip_adapter_pil,
+                ip_adapter_loaded=self._ip_adapter_loaded,
                 target_width=target_width,
                 target_height=target_height,
             )
@@ -1302,6 +1304,7 @@ def _run_sdxl(
     controlnet_enabled: bool,
     controlnet_conditioning_scale: float,
     ip_adapter_image: Optional[Any] = None,
+    ip_adapter_loaded: bool = False,
     target_width: Optional[int] = None,
     target_height: Optional[int] = None,
 ) -> Any:
@@ -1332,6 +1335,10 @@ def _run_sdxl(
         ControlNet influence scale.
     ip_adapter_image:
         Optional PIL Image for IP-Adapter style conditioning.
+    ip_adapter_loaded:
+        Whether IP-Adapter is loaded in the pipeline. When True but no
+        ip_adapter_image is provided, a dummy image is used to satisfy
+        the UNet's image_embeds requirement (scale is 0 so content doesn't matter).
     target_width, target_height:
         Optional explicit output dimensions.
 
@@ -1387,6 +1394,12 @@ def _run_sdxl(
 
     if ip_adapter_image is not None:
         kwargs["ip_adapter_image"] = ip_adapter_image
+    elif ip_adapter_loaded:
+        # IP-Adapter is loaded but disabled - provide dummy image for image_embeds
+        # The scale is 0.0 so the actual content doesn't matter
+        from PIL import Image
+        dummy_image = Image.new("RGB", (224, 224), (0, 0, 0))
+        kwargs["ip_adapter_image"] = dummy_image
 
     logger.info(
         "SDXL generate: steps=%d strength=%.2f cfg=%.1f seed=%d controlnet=%s "
