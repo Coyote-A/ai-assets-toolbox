@@ -198,6 +198,7 @@ class DownloadService:
                 ...
             }
         """
+        models_volume.reload()
         manifest = read_manifest(MODELS_MOUNT_PATH)
         result: dict = {}
         for entry in ALL_MODELS:
@@ -215,6 +216,7 @@ class DownloadService:
 
         Returns an empty dict if no download has been started yet.
         """
+        models_volume.reload()
         progress_path = os.path.join(MODELS_MOUNT_PATH, PROGRESS_FILE)
         if os.path.exists(progress_path):
             with open(progress_path, encoding="utf-8") as fh:

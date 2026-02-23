@@ -376,7 +376,7 @@ def create_setup_wizard() -> tuple:
         civitai_tok = civitai_tok or ""
 
         # Save tokens to server-side storage
-        save_tokens(session_id, hf_token=hf_tok, civitai_token=civitai_tok)
+        save_tokens(hf_token=hf_tok, civitai_token=civitai_tok)
 
         hf_saved = bool(hf_tok)
         civitai_saved = bool(civitai_tok)
