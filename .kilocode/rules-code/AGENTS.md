@@ -13,7 +13,7 @@ Use this to verify model files exist before assuming download issues.
 
 ## Image Handling
 - Images passed as raw `bytes` between services (not base64). Modal's cloudpickle handles serialization.
-- Gradio 6.0: Use `gr.mount_gradio_app(fastapi_app, blocks, path="/")` — Blocks is not directly callable as ASGI app.
+- Gradio 6.6: Use `gr.mount_gradio_app(fastapi_app, blocks, path="/")` — Blocks is not directly callable as ASGI app.
 
 ## Volume Paths
 - Models: `/vol/models` mount point, manifest at `/vol/models/.manifest.json`

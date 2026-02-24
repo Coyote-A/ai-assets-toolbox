@@ -25,7 +25,7 @@ Use this to verify model files exist before assuming download issues.
 - **Single Modal app** — All services register against `app` from `src.app_config` via `@app.cls()`. Import order matters: GPU services must be imported in `src/app.py` to register.
 - **Models in Volumes** — Weights stored in Modal Volumes (`ai-toolbox-models`, `ai-toolbox-loras`), NOT baked into Docker images. Mount paths: `/vol/models`, `/vol/loras`.
 - **No HTTP between services** — GPU work dispatched via `.remote()` calls from Gradio UI. Images passed as raw `bytes` (Modal's cloudpickle handles serialization).
-- **Gradio 6.0 ASGI** — Must use `gr.mount_gradio_app(fastapi_app, blocks, path="/")` — Blocks is not directly callable as ASGI app.
+- **Gradio 6.6 ASGI** — Must use `gr.mount_gradio_app(fastapi_app, blocks, path="/")` — Blocks is not directly callable as ASGI app.
 
 ## Critical Patterns
 - **Image imports** — All Modal images need `.add_local_python_source("src")` for `from src.xxx` imports to work inside containers.
