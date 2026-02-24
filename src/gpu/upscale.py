@@ -273,36 +273,13 @@ class UpscaleService:
         self._compel = _build_compel(self._pipe)
 
         # ------------------------------------------------------------------
-        # 7. Load IP-Adapter at startup (avoids lazy-load on first inference)
+        # 7. IP-Adapter will be lazy-loaded when first needed
         # ------------------------------------------------------------------
+        # IP-Adapter is only loaded when ip_adapter_enabled=True is passed to
+        # the generation method. This saves memory and startup time when
+        # IP-Adapter is not used.
         self._ip_adapter_loaded: bool = False
-        logger.info(
-            "Loading IP-Adapter from '%s' with CLIP encoder '%s'",
-            ip_adapter_path,
-            clip_vit_h_path,
-        )
-        try:
-            self._pipe.load_ip_adapter(
-                os.path.dirname(ip_adapter_path),
-                subfolder="",
-                weight_name=os.path.basename(ip_adapter_path),
-                image_encoder_folder=clip_vit_h_path,
-            )
-            # Move the image encoder to CUDA so it matches the pipeline device.
-            # Without this the encoder stays on CPU while the pipeline runs on
-            # CUDA, causing a device-mismatch RuntimeError during inference.
-            if hasattr(self._pipe, "image_encoder") and self._pipe.image_encoder is not None:
-                self._pipe.image_encoder.to("cuda")
-                logger.info("IP-Adapter image_encoder moved to CUDA")
-            # Start with scale 0 — will be set to the requested value when
-            # IP-Adapter is actually used, or kept at 0 to disable it.
-            self._pipe.set_ip_adapter_scale(0.0)
-            self._ip_adapter_loaded = True
-            logger.info("IP-Adapter loaded successfully at startup (scale=0.0)")
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.warning(
-                "Failed to load IP-Adapter at startup — will proceed without it: %s", exc
-            )
+        logger.info("IP-Adapter will be lazy-loaded when first needed (not loaded at startup)")
 
         logger.info("=== UpscaleService: all models loaded ===")
 
@@ -794,7 +771,7 @@ class UpscaleService:
 
         logger.info(
             "upscale_tiles: tiles=%d steps=%d strength=%.2f controlnet=%s "
-            "ip_adapter=%s target=%s clip_skip=%d checkpoint=%s vae=%s embeddings=%s",
+            "ip_adapter=%s target=%s checkpoint=%s vae=%s embeddings=%s",
             len(tiles),
             steps,
             strength,
