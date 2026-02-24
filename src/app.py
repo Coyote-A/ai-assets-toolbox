@@ -27,26 +27,26 @@ from src.ui import create_gradio_app
 
 # JavaScript patch to fix broken fullscreen button in Gradio.
 # In Gradio 6.x, js/head params moved from Blocks constructor to mount_gradio_app().
+# Note: The js= parameter injects code directly into a <script> tag, so it must be
+# raw JavaScript statements, NOT a function wrapper (which causes syntax error).
 FULLSCREEN_JS_PATCH = """
-function() {
-    console.log('[FULLSCREEN PATCH LOADED]');
-    document.addEventListener('click', function(e) {
-        const btn = e.target.closest('button[aria-label="Fullscreen"], button[title="Fullscreen"]');
-        if (!btn) return;
-        const root = btn.closest('.image-container, .gr-image, figure, .svelte-image');
-        if (!root) return;
-        const media = root.querySelector('img') || root.querySelector('video');
-        if (!media) return;
-        console.log('[FULLSCREEN INTERCEPTED]');
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        if (document.fullscreenElement) {
-            (document.exitFullscreen || document.webkitExitFullscreen).call(document);
-        } else {
-            (media.requestFullscreen || media.webkitRequestFullscreen).call(media);
-        }
-    }, true);
-}
+console.log('[FULLSCREEN PATCH LOADED]');
+document.addEventListener('click', function(e) {
+    const btn = e.target.closest('button[aria-label="Fullscreen"], button[title="Fullscreen"]');
+    if (!btn) return;
+    const root = btn.closest('.image-container, .gr-image, figure, .svelte-image');
+    if (!root) return;
+    const media = root.querySelector('img') || root.querySelector('video');
+    if (!media) return;
+    console.log('[FULLSCREEN INTERCEPTED]');
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (document.fullscreenElement) {
+        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    } else {
+        (media.requestFullscreen || media.webkitRequestFullscreen).call(media);
+    }
+}, true);
 """
 
 
