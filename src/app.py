@@ -30,23 +30,32 @@ from src.ui import create_gradio_app
 # Note: The js= parameter injects code directly into a <script> tag, so it must be
 # raw JavaScript statements, NOT a function wrapper (which causes syntax error).
 FULLSCREEN_JS_PATCH = """
-console.log('[FULLSCREEN PATCH LOADED]');
 document.addEventListener('click', function(e) {
+    // Find fullscreen button
     const btn = e.target.closest('button[aria-label="Fullscreen"], button[title="Fullscreen"]');
     if (!btn) return;
+    
+    // Find image container
     const root = btn.closest('.image-container, .gr-image, figure, .svelte-image');
     if (!root) return;
+    
+    // Find the actual image/video
     const media = root.querySelector('img') || root.querySelector('video');
     if (!media) return;
-    console.log('[FULLSCREEN INTERCEPTED]');
+
+    // CRITICAL: kill the event BEFORE it reaches Gradio's broken handler
     e.preventDefault();
     e.stopImmediatePropagation();
-    if (document.fullscreenElement) {
-        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+
+    // Toggle fullscreen natively
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+        const exit = document.exitFullscreen || document.webkitExitFullscreen;
+        if (exit) exit.call(document);
     } else {
-        (media.requestFullscreen || media.webkitRequestFullscreen).call(media);
+        const req = media.requestFullscreen || media.webkitRequestFullscreen;
+        if (req) req.call(media);
     }
-}, true);
+}, true); // true = capture phase (earliest possible moment)
 """
 
 
