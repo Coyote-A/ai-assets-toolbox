@@ -1084,78 +1084,9 @@ def create_gradio_app() -> gr.Blocks:
     # Gradio 6.0 moved css to launch(), but 6.1+ restored it to Blocks constructor.
     # Setting css as attribute after creation works in all 6.x versions.
 
-    # JavaScript patch to fix fullscreen button for images/videos in Gradio.
-    # Uses gr.HTML component to inject script directly - works with ASGI apps.
-    # This bypasses Gradio 6.x limitations where js/css/head params don't work with mount_gradio_app.
-    jspatch = '''
-<script type="text/JavaScript">
-console.log('[HTML INJECTOR] Script loaded');
-
-function setupFullscreenInterceptor() {
-    console.log('[HTML INJECTOR] Setting up interceptor');
-    
-    // Перехватываем клики на фазе capture
-    document.addEventListener('click', function(e) {
-        const btn = e.target.closest('button[aria-label="Fullscreen"], button[title="Fullscreen"], button.svelte-1mwvhlq');
-        if (!btn) return;
-        
-        const root = btn.closest('.image-container, .gr-image, figure, .wrap');
-        if (!root) return;
-        
-        const media = root.querySelector('img') || root.querySelector('video');
-        if (!media) return;
-
-        console.log('[FULLSCREEN INTERCEPTED] Taking over from Gradio');
-        
-        // Убиваем событие, чтобы Gradio не упал
-        e.preventDefault();
-        e.stopImmediatePropagation();
-
-        // Нативный фуллскрин
-        if (document.fullscreenElement) {
-            const exit = document.exitFullscreen || document.webkitExitFullscreen;
-            if (exit) exit.call(document);
-        } else {
-            const req = media.requestFullscreen || media.webkitRequestFullscreen;
-            if (req) req.call(media);
-        }
-    }, true);
-    
-    // Перехватываем setter onclick на всякий случай
-    const desc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'onclick');
-    if (desc) {
-        Object.defineProperty(HTMLElement.prototype, 'onclick', {
-            get: desc.get,
-            set: function(fn) {
-                const wrapped = fn ? function(e) {
-                    try {
-                        return fn.call(this, e);
-                    } catch (err) {
-                        if (err instanceof TypeError && err.message.includes('is not a function')) {
-                            console.warn('[FULLSCREEN CAUGHT]', err.message);
-                            return; // Просто глушим ошибку
-                        }
-                        throw err;
-                    }
-                } : fn;
-                desc.set.call(this, wrapped);
-            }
-        });
-    }
-}
-
-// Запускаем немедленно и дублируем по загрузке
-setupFullscreenInterceptor();
-document.addEventListener('DOMContentLoaded', setupFullscreenInterceptor);
-</script>
-'''
-
     demo = gr.Blocks(title="AI Assets Toolbox")
     demo.css = custom_css
     with demo:
-        # Inject fullscreen fix script via HTML component (works with ASGI)
-        gr.HTML(jspatch)
-        
         gr.Markdown("# 🎨 AI Assets Toolbox")
         gr.Markdown(
             "Tile-based AI upscaling powered by Illustrious-XL + ControlNet Tile on Modal GPU."
