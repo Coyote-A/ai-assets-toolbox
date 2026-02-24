@@ -530,6 +530,30 @@ def _tile_pil(tile: Dict[str, Any], use_processed: bool = False) -> Image.Image:
     return _bytes_to_pil(tile["original_bytes"])
 
 
+def _create_comparison_image(tile: Dict[str, Any]) -> Optional[Image.Image]:
+    """Create a side-by-side comparison image: original | processed.
+    
+    Returns None if the tile hasn't been processed yet.
+    """
+    if not tile.get("processed_bytes"):
+        return None
+    
+    orig_img = _bytes_to_pil(tile["original_bytes"])
+    proc_img = _bytes_to_pil(tile["processed_bytes"])
+    
+    # Ensure both images have the same height
+    if orig_img.height != proc_img.height:
+        proc_img = proc_img.resize((int(proc_img.width * orig_img.height / proc_img.height), orig_img.height), Image.LANCZOS)
+    
+    # Create side-by-side comparison
+    total_width = orig_img.width + proc_img.width
+    comparison = Image.new("RGB", (total_width, orig_img.height))
+    comparison.paste(orig_img, (0, 0))
+    comparison.paste(proc_img, (orig_img.width, 0))
+    
+    return comparison
+
+
 # ---------------------------------------------------------------------------
 # Image upload handler
 # ---------------------------------------------------------------------------
@@ -1292,7 +1316,7 @@ def _build_upscale_tab() -> None:
                             height=200,
                         )
                         tile_proc_preview = gr.Image(
-                            label="Processed",
+                            label="Original | Processed (comparison)",
                             type="pil",
                             interactive=False,
                             height=200,
@@ -1620,7 +1644,7 @@ def _build_upscale_tab() -> None:
             else:
                 orig_tile = orig_tile_pil
 
-            proc_tile = _tile_pil(tile, use_processed=True) if tile.get("processed_bytes") else None
+            proc_tile = _create_comparison_image(tile)
             grid_html = _rebuild_grid_html(tiles, full_b64, idx, orig_img)
 
             return idx, orig_tile, proc_tile, prompt, grid_html
@@ -2075,7 +2099,7 @@ def _build_upscale_tab() -> None:
             )
             grid_html = _rebuild_grid_html(updated, full_b64, selected_idx, orig_img)
             tile = updated[selected_idx]
-            proc_tile = _tile_pil(tile, use_processed=True) if tile.get("processed_bytes") else None
+            proc_tile = _create_comparison_image(tile)
             return updated, grid_html, proc_tile, result, msg
 
         upscale_sel_btn.click(
