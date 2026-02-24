@@ -158,13 +158,20 @@ def fetch_model_info(
         # ------------------------------------------------------------------
         # Determine internal model type
         # ------------------------------------------------------------------
-        raw_type = (model_data or version_data).get("type", "").lower()
-        if "lora" in raw_type or "loha" in raw_type or "locon" in raw_type:
-            model_type = "lora"
-        elif "checkpoint" in raw_type:
-            model_type = "checkpoint"
+        # Get the raw CivitAI type (e.g., "LORA", "Checkpoint", "TextualInversion", "VAE")
+        raw_type = (model_data or version_data).get("type", "")
+        
+        # Normalize to title case for consistent mapping
+        # The download service will map this to our ModelType enum
+        if raw_type:
+            model_type = raw_type.title()  # "LORA" -> "Lora", "Checkpoint" -> "Checkpoint"
+            # Handle special cases
+            if model_type.lower() in ("lora", "loha", "locon"):
+                model_type = "LORA"
+            elif model_type.lower() == "textualinversion":
+                model_type = "TextualInversion"
         else:
-            model_type = raw_type or "unknown"
+            model_type = "unknown"
 
         # ------------------------------------------------------------------
         # Trigger words

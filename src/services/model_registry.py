@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import List
+
+from src.services.model_metadata import ModelType, ModelInfo
 
 # ---------------------------------------------------------------------------
 # Volume / mount constants
@@ -281,3 +284,112 @@ def is_model_downloaded(key: str, volume_path: str = MODELS_MOUNT_PATH) -> bool:
 def all_models_ready(volume_path: str = MODELS_MOUNT_PATH) -> bool:
     """Return ``True`` if every model in :data:`ALL_MODELS` is downloaded."""
     return all(is_model_downloaded(m.key, volume_path) for m in ALL_MODELS)
+
+
+# ---------------------------------------------------------------------------
+# Model Registry for user models (CivitAI)
+# ---------------------------------------------------------------------------
+
+class ModelRegistry:
+    """Registry for user-downloaded models (LoRAs, checkpoints, embeddings, VAEs).
+    
+    This class provides a unified interface for querying models by type,
+    integrating with ModelMetadataManager for user models stored in the
+    lora_volume.
+    
+    Note: This is distinct from the infrastructure models (ModelEntry) which
+    are HuggingFace models managed by the setup wizard.
+    """
+    
+    def __init__(self, lora_volume_path: str = LORAS_MOUNT_PATH):
+        """Initialize the registry.
+        
+        Args:
+            lora_volume_path: Path to the lora volume mount point.
+        """
+        self._volume_path = lora_volume_path
+    
+    def _get_manager(self):
+        """Get the ModelMetadataManager (lazy import to avoid circular deps)."""
+        from src.services.model_metadata import ModelMetadataManager
+        return ModelMetadataManager(self._volume_path)
+    
+    def list_models(self, model_type: ModelType | None = None) -> List[ModelInfo]:
+        """List all downloaded models, optionally filtered by type.
+        
+        Args:
+            model_type: Optional ModelType to filter by. None returns all.
+            
+        Returns:
+            List of ModelInfo objects.
+        """
+        return self._get_manager().list_models(model_type)
+    
+    def get_models_by_type(self, model_type: ModelType) -> List[ModelInfo]:
+        """Get all downloaded models of a specific type.
+        
+        Args:
+            model_type: The ModelType to filter by.
+            
+        Returns:
+            List of ModelInfo objects of the specified type.
+        """
+        return self._get_manager().get_models_by_type(model_type)
+    
+    def get_checkpoints(self) -> List[ModelInfo]:
+        """Get all downloaded checkpoints."""
+        return self._get_manager().get_checkpoints()
+    
+    def get_loras(self) -> List[ModelInfo]:
+        """Get all downloaded LoRAs."""
+        return self._get_manager().get_loras()
+    
+    def get_embeddings(self) -> List[ModelInfo]:
+        """Get all downloaded embeddings."""
+        return self._get_manager().get_embeddings()
+    
+    def get_vaes(self) -> List[ModelInfo]:
+        """Get all downloaded VAEs."""
+        return self._get_manager().get_vaes()
+    
+    def get_model(self, filename: str) -> ModelInfo | None:
+        """Get a specific model by filename.
+        
+        Args:
+            filename: The model's filename.
+            
+        Returns:
+            ModelInfo if found, None otherwise.
+        """
+        return self._get_manager().get_model(filename)
+    
+    def get_active_checkpoint(self) -> str | None:
+        """Get the currently active checkpoint filename."""
+        return self._get_manager().get_active_checkpoint()
+    
+    def set_active_checkpoint(self, filename: str | None) -> None:
+        """Set the active checkpoint."""
+        self._get_manager().set_active_checkpoint(filename)
+    
+    def get_active_vae(self) -> str | None:
+        """Get the currently active VAE filename."""
+        return self._get_manager().get_active_vae()
+    
+    def set_active_vae(self, filename: str | None) -> None:
+        """Set the active VAE."""
+        self._get_manager().set_active_vae(filename)
+
+
+# Global registry instance (lazy initialization)
+_registry: ModelRegistry | None = None
+
+def get_registry() -> ModelRegistry:
+    """Get the global ModelRegistry instance.
+    
+    Returns:
+        The singleton ModelRegistry instance.
+    """
+    global _registry
+    if _registry is None:
+        _registry = ModelRegistry()
+    return _registry

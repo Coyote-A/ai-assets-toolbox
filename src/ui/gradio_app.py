@@ -661,6 +661,7 @@ def _upscale_tiles_parallel(
     ip_adapter_bytes: Optional[bytes],
     ip_adapter_scale: float,
     effective_gen_res: int,
+    checkpoint_name: Optional[str] = None,
     progress: gr.Progress = None,
 ) -> Tuple[List[Dict], str]:
     """
@@ -679,6 +680,7 @@ def _upscale_tiles_parallel(
         ip_adapter_bytes: Style reference image bytes (if any).
         ip_adapter_scale: IP-Adapter influence scale.
         effective_gen_res: Generation resolution per tile.
+        checkpoint_name: Optional checkpoint name to use instead of default.
         progress: Gradio Progress tracker for UI updates.
 
     Returns:
@@ -724,6 +726,7 @@ def _upscale_tiles_parallel(
             "ip_adapter_scale": ip_adapter_scale,
             "target_width": effective_gen_res,
             "target_height": effective_gen_res,
+            "checkpoint_name": checkpoint_name,
         }
         for i, batch in enumerate(batches)
     ]
@@ -749,6 +752,7 @@ def _upscale_tiles_parallel(
             [inp["ip_adapter_scale"] for inp in batch_inputs],
             [inp["target_width"] for inp in batch_inputs],
             [inp["target_height"] for inp in batch_inputs],
+            [inp["checkpoint_name"] for inp in batch_inputs],
         ):
             completed_batches += 1
             batch_id = batch_result.get("batch_id", "?")
@@ -814,6 +818,7 @@ def _upscale_tiles_batch(
     ip_adapter_image: Optional[Image.Image] = None,
     ip_adapter_scale: float = 0.6,
     gen_res: int = 0,
+    checkpoint_name: Optional[str] = None,
 ) -> Tuple[List[Dict], Optional[Image.Image], str]:
     """
     Process a batch of tiles through UpscaleService.
@@ -838,6 +843,7 @@ def _upscale_tiles_batch(
         ip_adapter_image:    style reference PIL Image (optional).
         ip_adapter_scale:    IP-Adapter influence scale.
         gen_res:             generation resolution per tile (0 = same as tile_size).
+        checkpoint_name:     filename of checkpoint to use (None = default Illustrious-XL).
 
     Returns:
         (updated_tiles_state, assembled_result_image, status_text)
@@ -949,6 +955,7 @@ def _upscale_tiles_batch(
             ip_adapter_bytes=ip_adapter_bytes,
             ip_adapter_scale=ip_adapter_scale,
             effective_gen_res=effective_gen_res,
+            checkpoint_name=checkpoint_name,
             progress=None,  # Progress passed through Gradio event handler
         )
     else:
@@ -971,6 +978,7 @@ def _upscale_tiles_batch(
                 ip_adapter_scale=ip_adapter_scale,
                 target_width=effective_gen_res,
                 target_height=effective_gen_res,
+                checkpoint_name=checkpoint_name,
             )
             processing_status = f"Processed {len(results)} tiles"
         except Exception as exc:  # noqa: BLE001
@@ -1147,6 +1155,8 @@ def create_gradio_app() -> gr.Blocks:
         #   [6] ← tool_group injected here by the caller (us)
         #   [7] step1_group
         #   [8] step2_group
+        #   [9] step3_group (checkpoint selection)
+        #   [10] step4_group (ready)
         #
         # We also need to update the Settings tab textboxes, so we add them
         # after the wizard outputs.
@@ -1155,7 +1165,7 @@ def create_gradio_app() -> gr.Blocks:
             on_load_outputs_wizard[:6]   # hf_input, civitai_input, hf_status,
                                          # civitai_status, save_status, wizard_group
             + [tool_group]               # injected here — index 6
-            + on_load_outputs_wizard[6:] # step1_group, step2_group
+            + on_load_outputs_wizard[6:] # step1_group, step2_group, step3_group, step4_group
             + [settings_hf_token_input, settings_civitai_token_input,
                settings_hf_status_html, settings_civitai_status_html]  # settings tab
         )
@@ -1369,6 +1379,29 @@ def _build_upscale_tab() -> None:
 
                 # ---- 🎨 Generation Settings ----
                 with gr.Accordion("🎨 Generation Settings", open=True):
+                    # Checkpoint selector - base model selection
+                    gr.Markdown("### Base Model (Checkpoint)")
+                    with gr.Row():
+                        checkpoint_dropdown = gr.Dropdown(
+                            label="Active Checkpoint",
+                            choices=[("Default (Illustrious-XL)", None)],
+                            value=None,
+                            info="Select SDXL checkpoint for generation. Default uses Illustrious-XL v2.0.",
+                            interactive=True,
+                            scale=4,
+                            elem_id="upscale_checkpoint",
+                        )
+                        refresh_checkpoints_btn = gr.Button(
+                            "🔄",
+                            variant="secondary",
+                            scale=1,
+                            min_width=40,
+                            elem_id="upscale_refresh_checkpoints",
+                        )
+                    
+                    # State for available checkpoints
+                    available_checkpoints_state = gr.State(value=[])
+                    
                     global_prompt = gr.Textbox(
                         label="Global Style Prompt",
                         placeholder="masterpiece, best quality, highly detailed, sharp focus",
@@ -1755,12 +1788,77 @@ def _build_upscale_tab() -> None:
         )
 
         # ----------------------------------------------------------------
-        # Tab select → refresh LoRA list when upscale tab is selected
+        # Checkpoint Refresh handler
         # ----------------------------------------------------------------
-        upscale_tab.select(
-            fn=on_lora_refresh,
+        def on_checkpoint_refresh():
+            """Refresh the list of available checkpoints from the model registry."""
+            try:
+                from src.services.download import DownloadService  # noqa: PLC0415
+                checkpoints: List[Dict] = DownloadService().list_user_models.remote(model_type="checkpoint")
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("list_user_models (checkpoint) error")
+                checkpoints = []
+            
+            # Build choices: (display_name, filename)
+            # Always include Default option at the top
+            choices = [("Default (Illustrious-XL)", None)]
+            for cp in checkpoints:
+                name = cp.get("name") or cp.get("filename", "Unknown")
+                filename = cp.get("filename", "")
+                choices.append((name, filename))
+            
+            return gr.update(choices=choices, value=None), checkpoints
+
+        refresh_checkpoints_btn.click(
+            fn=on_checkpoint_refresh,
             inputs=[],
-            outputs=[lora_controls_html, available_loras_state, lora_selections_state],
+            outputs=[checkpoint_dropdown, available_checkpoints_state],
+        )
+
+        # ----------------------------------------------------------------
+        # Tab select → refresh both LoRA list and checkpoints when upscale tab is selected
+        # ----------------------------------------------------------------
+        def on_upscale_tab_select():
+            """Refresh both LoRAs and checkpoints when the upscale tab is selected."""
+            # Get LoRAs
+            try:
+                from src.services.download import DownloadService  # noqa: PLC0415
+                loras: List[Dict] = DownloadService().list_user_models.remote(model_type="lora")
+            except Exception:  # noqa: BLE001
+                logger.exception("list_user_models (lora) error")
+                loras = []
+            default_sels = [
+                {
+                    "name": m.get("name") or m.get("filename", ""),
+                    "filename": m.get("filename", ""),
+                    "enabled": True,
+                    "weight": m.get("default_weight", 1.0),
+                }
+                for m in loras
+            ]
+            html = _build_lora_controls_html(loras, default_sels)
+            
+            # Get checkpoints
+            try:
+                checkpoints: List[Dict] = DownloadService().list_user_models.remote(model_type="checkpoint")
+            except Exception:  # noqa: BLE001
+                logger.exception("list_user_models (checkpoint) error")
+                checkpoints = []
+            
+            # Build checkpoint choices
+            cp_choices = [("Default (Illustrious-XL)", None)]
+            for cp in checkpoints:
+                name = cp.get("name") or cp.get("filename", "Unknown")
+                filename = cp.get("filename", "")
+                cp_choices.append((name, filename))
+            
+            return html, loras, default_sels, gr.update(choices=cp_choices, value=None), checkpoints
+
+        upscale_tab.select(
+            fn=on_upscale_tab_select,
+            inputs=[],
+            outputs=[lora_controls_html, available_loras_state, lora_selections_state, 
+                     checkpoint_dropdown, available_checkpoints_state],
         )
 
         # ----------------------------------------------------------------
@@ -1786,6 +1884,7 @@ def _build_upscale_tab() -> None:
 
         def on_upscale_all(
             tiles, orig_img,
+            checkpoint_name,
             g_prompt, neg_prompt,
             ts, ov,
             strength, steps, cfg, seed,
@@ -1814,6 +1913,7 @@ def _build_upscale_tab() -> None:
                 ip_adapter_image=ip_img,
                 ip_adapter_scale=ip_scale,
                 gen_res=gen_res_val,
+                checkpoint_name=checkpoint_name,
             )
 
             if result is None:
@@ -1921,6 +2021,7 @@ def _build_upscale_tab() -> None:
             fn=on_upscale_all,
             inputs=[
                 tiles_state, original_img_state,
+                checkpoint_dropdown,
                 global_prompt, negative_prompt,
                 tile_size_num, overlap_num,
                 strength_sl, steps_sl, cfg_sl, seed_num,
@@ -1940,6 +2041,7 @@ def _build_upscale_tab() -> None:
         # ----------------------------------------------------------------
         def on_upscale_selected(
             tiles, selected_idx, orig_img,
+            checkpoint_name,
             g_prompt, neg_prompt,
             ts, ov,
             strength, steps, cfg, seed,
@@ -1968,6 +2070,7 @@ def _build_upscale_tab() -> None:
                 ip_adapter_image=ip_img,
                 ip_adapter_scale=ip_scale,
                 gen_res=gen_res_val,
+                checkpoint_name=checkpoint_name,
             )
             grid_html = _rebuild_grid_html(updated, full_b64, selected_idx, orig_img)
             tile = updated[selected_idx]
@@ -1978,6 +2081,7 @@ def _build_upscale_tab() -> None:
             fn=on_upscale_selected,
             inputs=[
                 tiles_state, selected_idx_state, original_img_state,
+                checkpoint_dropdown,
                 global_prompt, negative_prompt,
                 tile_size_num, overlap_num,
                 strength_sl, steps_sl, cfg_sl, seed_num,
@@ -2336,6 +2440,15 @@ def _build_model_manager_tab() -> None:
                 )
                 preview_btn = gr.Button("🔍 Preview", variant="secondary", scale=1)
 
+            # Model type filter for downloads
+            download_model_type = gr.Radio(
+                label="Model Type",
+                choices=["Auto-detect", "Checkpoint", "LoRA", "Embedding", "VAE"],
+                value="Auto-detect",
+                info="Select model type or let the system auto-detect from CivitAI metadata.",
+                interactive=True,
+            )
+
             preview_html = gr.HTML(
                 value="",
                 label="Model Preview",
@@ -2413,7 +2526,7 @@ def _build_model_manager_tab() -> None:
             # ------------------------------------------------------------------
             # Download handler
             # ------------------------------------------------------------------
-            def on_download_civitai(url_or_id: str):
+            def on_download_civitai(url_or_id: str, model_type: str):
                 from src.services.token_store import get_tokens
 
                 # Get token from server-side storage
@@ -2422,10 +2535,15 @@ def _build_model_manager_tab() -> None:
 
                 if not url_or_id.strip():
                     return "⚠️ No URL/ID provided."
+                
+                # Convert model type selection to parameter
+                # "Auto-detect" means None (let the system figure it out)
+                model_type_param = None if model_type == "Auto-detect" else model_type.lower()
+                
                 try:
                     from src.services.download import DownloadService  # noqa: PLC0415
                     result = DownloadService().download_civitai_model.remote(
-                        url_or_id.strip(), token.strip() or None
+                        url_or_id.strip(), token.strip() or None, model_type=model_type_param
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("download_civitai_model error")
@@ -2441,7 +2559,7 @@ def _build_model_manager_tab() -> None:
 
             download_civitai_btn.click(
                 fn=on_download_civitai,
-                inputs=[civitai_url_input],
+                inputs=[civitai_url_input, download_model_type],
                 outputs=[download_status],
             )
 
@@ -2451,7 +2569,7 @@ def _build_model_manager_tab() -> None:
         with gr.Accordion("📦 Installed Models", open=True):
             with gr.Row():
                 filter_radio = gr.Radio(
-                    choices=["All", "LoRAs", "Checkpoints"],
+                    choices=["All", "LoRAs", "Checkpoints", "Embeddings", "VAEs"],
                     value="All",
                     label="Filter",
                     scale=3,

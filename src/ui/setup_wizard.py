@@ -117,14 +117,15 @@ def create_setup_wizard() -> tuple:
     """
     Create the setup wizard UI components inside the current ``gr.Blocks`` context.
 
-    The wizard has three steps rendered as ``gr.Group`` blocks with toggled
+    The wizard has four steps rendered as ``gr.Group`` blocks with toggled
     visibility:
 
     * **Step 1** — API keys (HuggingFace + CivitAI), persisted via
       server-side JSON file storage.
     * **Step 2** — Model downloads with live progress polling via
       ``gr.Timer``.
-    * **Step 3** — "Ready" screen with a *Start* button.
+    * **Step 3** — Checkpoint selection (optional, default available).
+    * **Step 4** — "Ready" screen with a *Start* button.
 
     The caller is responsible for wiring the *Start* button and the
     combined page-load handler to ``demo.load``.  All necessary references
@@ -134,8 +135,8 @@ def create_setup_wizard() -> tuple:
         A 6-tuple ``(wizard_group, start_btn,
         on_load_fn, on_load_inputs, on_load_outputs, step1_group)`` where:
 
-        * *wizard_group* — outer ``gr.Group`` wrapping all three steps.
-        * *start_btn* — ``gr.Button`` on step 3; wire its ``.click`` with
+        * *wizard_group* — outer ``gr.Group`` wrapping all four steps.
+        * *start_btn* — ``gr.Button`` on step 4; wire its ``.click`` with
           ``outputs=[wizard_group, tool_group]``.
         * *on_load_fn* — combined page-load function; retrieves tokens from
           server-side storage, checks model status, and returns visibility
@@ -164,12 +165,12 @@ def create_setup_wizard() -> tuple:
         # Step 1: API Keys
         # --------------------------------------------------------------
         with gr.Group(visible=True) as step1_group:
-            gr.Markdown("## Step 1 of 3 — API Keys")
+            gr.Markdown("## Step 1 of 4 — API Keys")
             gr.Markdown(
                 "These tokens are stored **securely on the server** and persist "
                 "across server restarts. Each browser session has its own isolated storage.\n\n"
                 "* **HuggingFace token** — required only for gated models.\n"
-                "* **CivitAI token** — required only for LoRA downloads."
+                "* **CivitAI token** — required only for LoRA and checkpoint downloads."
             )
 
             with gr.Row():
@@ -204,7 +205,7 @@ def create_setup_wizard() -> tuple:
         # Step 2: Model Downloads
         # --------------------------------------------------------------
         with gr.Group(visible=False) as step2_group:
-            gr.Markdown("## Step 2 of 3 — Download Models")
+            gr.Markdown("## Step 2 of 4 — Download Models")
             gr.Markdown(
                 "Click **Download All** to start downloading the required models "
                 "to the server. Progress updates every 3 seconds."
@@ -228,10 +229,44 @@ def create_setup_wizard() -> tuple:
             poll_timer = gr.Timer(value=3, active=False)
 
         # --------------------------------------------------------------
-        # Step 3: Ready
+        # Step 3: Checkpoint Selection
         # --------------------------------------------------------------
         with gr.Group(visible=False) as step3_group:
-            gr.Markdown("## Step 3 of 3 — Ready! 🎉")
+            gr.Markdown("## Step 3 of 4 — Base Model (Checkpoint)")
+            gr.Markdown(
+                "Select a base SDXL model for generation. "
+                "The default **Illustrious-XL** is already available."
+            )
+
+            with gr.Row():
+                checkpoint_option = gr.Radio(
+                    label="Checkpoint Option",
+                    choices=[
+                        "Use Default (Illustrious-XL)",
+                        "Download from CivitAI URL",
+                        "Skip for now",
+                    ],
+                    value="Use Default (Illustrious-XL)",
+                    interactive=True,
+                )
+
+            with gr.Row(visible=False) as checkpoint_url_row:
+                checkpoint_url = gr.Textbox(
+                    label="CivitAI Checkpoint URL",
+                    placeholder="https://civitai.com/models/...",
+                    interactive=True,
+                    scale=3,
+                )
+                checkpoint_download_btn = gr.Button("⬇️ Download", variant="primary")
+
+            checkpoint_status = gr.Markdown("")
+            step3_next_btn = gr.Button("Continue →", variant="primary")
+
+        # --------------------------------------------------------------
+        # Step 4: Ready
+        # --------------------------------------------------------------
+        with gr.Group(visible=False) as step4_group:
+            gr.Markdown("## Step 4 of 4 — Ready! 🎉")
             gr.Markdown(
                 "All models have been downloaded successfully. "
                 "Click **Start** to open the toolbox."
@@ -248,7 +283,7 @@ def create_setup_wizard() -> tuple:
     #   • Models missing, tokens saved   → show wizard at Step 2
     #   • Models missing, no tokens      → show wizard at Step 1
     #
-    # Returns a 9-tuple that maps to on_load_outputs (see below).
+    # Returns a tuple that maps to on_load_outputs (see below).
     # ------------------------------------------------------------------
     def _on_load():
         """Combined page-load handler: restore tokens + route to correct step."""
@@ -295,6 +330,8 @@ def create_setup_wizard() -> tuple:
                 gr.Group(visible=True),           # tool_group  (caller provides at index 6)
                 gr.Group(visible=True),           # step1_group (doesn't matter, wizard hidden)
                 gr.Group(visible=False),          # step2_group
+                gr.Group(visible=False),          # step3_group
+                gr.Group(visible=False),          # step4_group
                 hf_tok,                           # settings_hf_token_input
                 civitai_tok,                      # settings_civitai_token_input
                 _token_status_html(hf_saved),     # settings_hf_status_html
@@ -314,6 +351,8 @@ def create_setup_wizard() -> tuple:
                 gr.Group(visible=False),          # tool_group
                 gr.Group(visible=False),          # step1_group  ← hidden
                 gr.Group(visible=True),           # step2_group  ← shown
+                gr.Group(visible=False),          # step3_group
+                gr.Group(visible=False),          # step4_group
                 hf_tok,                           # settings_hf_token_input
                 civitai_tok,                      # settings_civitai_token_input
                 _token_status_html(hf_saved),     # settings_hf_status_html
@@ -331,6 +370,8 @@ def create_setup_wizard() -> tuple:
             gr.Group(visible=False),              # tool_group
             gr.Group(visible=True),               # step1_group
             gr.Group(visible=False),              # step2_group
+            gr.Group(visible=False),              # step3_group
+            gr.Group(visible=False),              # step4_group
             hf_tok,                               # settings_hf_token_input
             civitai_tok,                          # settings_civitai_token_input
             _token_status_html(False),            # settings_hf_status_html
@@ -339,7 +380,7 @@ def create_setup_wizard() -> tuple:
 
     # Inputs: none needed (tokens are stored server-side)
     on_load_inputs = []
-    # Outputs (wizard-side): textboxes + status badges + wizard_group + step1_group + step2_group.
+    # Outputs (wizard-side): textboxes + status badges + wizard_group + step groups.
     # The caller must insert tool_group at index 6 when wiring demo.load, and add
     # settings tab outputs at the end:
     #
@@ -347,7 +388,7 @@ def create_setup_wizard() -> tuple:
     #       on_load_outputs[:6]   # hf_input, civitai_input, hf_status,
     #                             # civitai_status, save_status, wizard_group
     #       + [tool_group]        # injected by caller  (index 6)
-    #       + on_load_outputs[6:] # step1_group, step2_group
+    #       + on_load_outputs[6:] # step1_group, step2_group, step3_group, step4_group
     #       + [settings_hf_input, settings_civitai_input, settings_hf_status, settings_civitai_status]
     #   )
     on_load_outputs_wizard = [
@@ -360,6 +401,8 @@ def create_setup_wizard() -> tuple:
         # tool_group at index 6 — injected by caller
         step1_group,           # 7 (after caller inserts tool_group)
         step2_group,           # 8
+        step3_group,           # 9
+        step4_group,           # 10
         # Settings tab outputs (added by caller)
         # These are returned by _on_load but the caller provides the actual components
     ]
@@ -463,7 +506,7 @@ def create_setup_wizard() -> tuple:
                 "✅ All models downloaded!",
                 gr.Timer(active=False),   # stop polling
                 gr.Group(visible=False),  # hide step2
-                gr.Group(visible=True),   # show step3
+                gr.Group(visible=True),   # show step3 (checkpoint selection)
             )
 
         # Count how many are done
@@ -490,6 +533,87 @@ def create_setup_wizard() -> tuple:
     )
 
     # ------------------------------------------------------------------
+    # Event: Checkpoint option change — show/hide URL input
+    # ------------------------------------------------------------------
+    def _on_checkpoint_option_change(option: str):
+        """Show/hide checkpoint URL input based on selection."""
+        if option == "Download from CivitAI URL":
+            return gr.Row(visible=True)
+        else:
+            return gr.Row(visible=False)
+
+    checkpoint_option.change(
+        fn=_on_checkpoint_option_change,
+        inputs=[checkpoint_option],
+        outputs=[checkpoint_url_row],
+    )
+
+    # ------------------------------------------------------------------
+    # Event: Download checkpoint from CivitAI
+    # ------------------------------------------------------------------
+    def _on_download_checkpoint(url: str, option: str):
+        """Download checkpoint from CivitAI."""
+        if option != "Download from CivitAI URL":
+            return "Using default checkpoint."
+
+        if not url or not url.strip():
+            return "⚠️ Please enter a CivitAI URL."
+
+        try:
+            from src.services.download import DownloadService  # noqa: PLC0415
+            from src.services.token_store import get_tokens  # noqa: PLC0415
+
+            tokens = get_tokens()
+            civitai_tok = tokens.civitai_token or None
+
+            result = DownloadService().download_civitai_model.remote(
+                user_input=url.strip(),
+                civitai_token=civitai_tok,
+            )
+
+            if result.get("success"):
+                model_info = result.get("model_info", {})
+                name = model_info.get("name", "Unknown") if model_info else "Unknown"
+                if result.get("already_existed"):
+                    return f"✅ Checkpoint already exists: {name}"
+                return f"✅ Checkpoint downloaded: {name}"
+            else:
+                error = result.get("error", "Unknown error")
+                return f"❌ Error: {error}"
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to download checkpoint")
+            return f"❌ Error: {exc}"
+
+    checkpoint_download_btn.click(
+        fn=_on_download_checkpoint,
+        inputs=[checkpoint_url, checkpoint_option],
+        outputs=[checkpoint_status],
+    )
+
+    # ------------------------------------------------------------------
+    # Event: Step 3 → Step 4 (checkpoint selection → ready)
+    # ------------------------------------------------------------------
+    def _on_checkpoint_next(option: str):
+        """Handle next button click from checkpoint step."""
+        if option == "Skip for now":
+            return (
+                gr.Group(visible=False),  # step3_group
+                gr.Group(visible=True),   # step4_group
+                "⚠️ No custom checkpoint selected. Default Illustrious-XL will be used.",
+            )
+        return (
+            gr.Group(visible=False),  # step3_group
+            gr.Group(visible=True),   # step4_group
+            "",
+        )
+
+    step3_next_btn.click(
+        fn=_on_checkpoint_next,
+        inputs=[checkpoint_option],
+        outputs=[step3_group, step4_group, checkpoint_status],
+    )
+
+    # ------------------------------------------------------------------
     # Note: start_btn.click is NOT wired here.
     # The caller receives start_btn and wires it with the appropriate
     # outputs (wizard_group + tool_group) after both groups exist.
@@ -501,7 +625,8 @@ def create_setup_wizard() -> tuple:
     #       on_load_outputs[:5]          # hf_input, civitai_input,
     #                                    # hf_status, civitai_status, save_status
     #       + [tool_group]               # injected by caller  (index 6 in _on_load)
-    #       + on_load_outputs[5:]        # wizard_group, step1_group, step2_group
+    #       + on_load_outputs[5:]        # wizard_group, step1_group, step2_group,
+    #                                    # step3_group, step4_group
     #   )
     #   demo.load(fn=on_load_fn, inputs=on_load_inputs, outputs=full_outputs)
     # ------------------------------------------------------------------

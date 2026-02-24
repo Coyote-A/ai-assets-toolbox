@@ -18,7 +18,7 @@ import modal
 
 from src.app_config import app, download_image, lora_volume, models_volume
 from src.services.civitai import CivitAIModelInfo, fetch_model_info, parse_civitai_input
-from src.services.model_metadata import ModelInfo, ModelMetadataManager
+from src.services.model_metadata import ModelInfo, ModelMetadataManager, ModelType
 from src.services.model_registry import (
     ALL_MODELS,
     LORAS_MOUNT_PATH,
@@ -33,6 +33,126 @@ from src.services.model_registry import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# CivitAI Type Mapping
+# ---------------------------------------------------------------------------
+
+CIVITAI_TYPE_MAP = {
+    "Checkpoint": ModelType.CHECKPOINT,
+    "LORA": ModelType.LORA,
+    "LoCon": ModelType.LORA,  # LoCon is a type of LoRA
+    "LoHa": ModelType.LORA,   # LoHa is a type of LoRA
+    "TextualInversion": ModelType.EMBEDDING,
+    "Embedding": ModelType.EMBEDDING,
+    "VAE": ModelType.VAE,
+    "Controlnet": ModelType.CHECKPOINT,  # Treat as checkpoint for storage
+    "Poses": ModelType.EMBEDDING,  # ControlNet poses stored as embeddings
+    "Wildcards": ModelType.EMBEDDING,  # Wildcards stored as embeddings
+    "Upscaler": ModelType.CHECKPOINT,  # Upscale models
+    "MotionModule": ModelType.CHECKPOINT,  # AnimateDiff motion modules
+    "unknown": ModelType.LORA,  # Default to LoRA for backward compatibility
+}
+
+
+def map_civitai_type(civitai_type: str) -> ModelType:
+    """Map a CivitAI model type string to our internal ModelType enum.
+    
+    Args:
+        civitai_type: The model type string from CivitAI API (e.g., "LORA", "Checkpoint").
+        
+    Returns:
+        The corresponding ModelType enum value. Defaults to LORA if unknown.
+    """
+    return CIVITAI_TYPE_MAP.get(civitai_type, ModelType.LORA)
+
+
+def get_model_path(model_type: ModelType, filename: str) -> str:
+    """Get the storage path for a model based on its type.
+    
+    Args:
+        model_type: The ModelType enum value.
+        filename: The model filename.
+        
+    Returns:
+        The relative path under LORAS_MOUNT_PATH where the model should be stored.
+    """
+    if model_type == ModelType.CHECKPOINT:
+        return f"checkpoints/{filename}"
+    elif model_type == ModelType.LORA:
+        return f"loras/{filename}"
+    elif model_type == ModelType.EMBEDDING:
+        return f"embeddings/{filename}"
+    elif model_type == ModelType.VAE:
+        return f"vae/{filename}"
+    else:
+        return f"loras/{filename}"  # Default to loras for backward compatibility
+
+
+def detect_embedded_components(file_path: str) -> dict:
+    """
+    Detect embedded VAE or LoRA components in a checkpoint file.
+    
+    Uses safetensors metadata to check for VAE keys.
+    
+    Args:
+        file_path: Path to the safetensors checkpoint file.
+        
+    Returns:
+        dict with 'embedded_vae' and 'embedded_loras' keys.
+        - embedded_vae: "checkpoint_embedded" if VAE keys found, None otherwise.
+        - embedded_loras: List of embedded LoRA info (currently always empty).
+    """
+    import struct
+    
+    result = {
+        "embedded_vae": None,
+        "embedded_loras": [],
+    }
+    
+    try:
+        # Only check safetensors files
+        if not file_path.endswith('.safetensors'):
+            return result
+        
+        with open(file_path, 'rb') as f:
+            # Read header size (first 8 bytes, little-endian uint64)
+            header_size = struct.unpack('<Q', f.read(8))[0]
+            # Read header
+            header = f.read(header_size).decode('utf-8')
+            metadata = json.loads(header)
+        
+        # Check for VAE keys in the tensor names
+        # VAE tensors typically start with "vae." or "first_stage_model."
+        # The safetensors format stores tensor info as keys in the header
+        has_vae = False
+        vae_key_count = 0
+        
+        if isinstance(metadata, dict):
+            for key in metadata.keys():
+                # Skip the special __metadata__ key
+                if key == '__metadata__':
+                    continue
+                # Check for VAE tensor prefixes
+                if key.startswith('vae.') or key.startswith('first_stage_model.'):
+                    has_vae = True
+                    vae_key_count += 1
+        
+        if has_vae and vae_key_count > 0:
+            result["embedded_vae"] = "checkpoint_embedded"
+            logger.info(
+                "Detected embedded VAE in %s (%d VAE tensors found)",
+                os.path.basename(file_path),
+                vae_key_count,
+            )
+        
+        logger.debug("Embedded components detection result for %s: %s", file_path, result)
+        
+    except Exception as e:
+        logger.warning("Error detecting embedded components in %s: %s", file_path, e)
+    
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -444,15 +564,22 @@ class DownloadService:
         if civitai_info is None:
             return {"success": False, "model_info": None, "error": "Failed to fetch model info from CivitAI"}
 
-        # Step 3: Determine target path
-        # LoRAs go to /vol/loras/loras/, checkpoints to /vol/loras/checkpoints/
-        if civitai_info.model_type == "checkpoint":
-            subdir = os.path.join(LORAS_MOUNT_PATH, "checkpoints")
-        else:
-            subdir = os.path.join(LORAS_MOUNT_PATH, "loras")
+        # Step 3: Determine target path based on model type
+        # Map CivitAI type string to our ModelType enum
+        model_type = map_civitai_type(civitai_info.model_type)
+        
+        # Get the storage path for this model type
+        relative_path = get_model_path(model_type, civitai_info.filename)
+        target_path = os.path.join(LORAS_MOUNT_PATH, relative_path)
+        
+        # Ensure the subdirectory exists
+        subdir = os.path.dirname(target_path)
         os.makedirs(subdir, exist_ok=True)
-
-        target_path = os.path.join(subdir, civitai_info.filename)
+        
+        logger.info(
+            "Model type: %s -> %s, storing at: %s",
+            civitai_info.model_type, model_type.value, target_path
+        )
 
         # Check if already exists
         if os.path.exists(target_path):
@@ -546,8 +673,20 @@ class DownloadService:
             logger.error("Download failed: %s", e)
             return {"success": False, "model_info": None, "error": str(e)}
 
-        # Step 5: Save metadata
-        self._save_civitai_metadata(civitai_info)
+        # Step 5: Detect embedded components for checkpoints
+        embedded_vae = None
+        if model_type == ModelType.CHECKPOINT:
+            embedded = detect_embedded_components(target_path)
+            if embedded.get("embedded_vae"):
+                embedded_vae = embedded["embedded_vae"]
+                logger.info(
+                    "Checkpoint '%s' has embedded VAE: %s",
+                    civitai_info.filename,
+                    embedded_vae,
+                )
+
+        # Step 6: Save metadata
+        self._save_civitai_metadata(civitai_info, embedded_vae=embedded_vae)
 
         lora_volume.commit()
 
@@ -558,12 +697,27 @@ class DownloadService:
             "already_existed": False,
         }
 
-    def _save_civitai_metadata(self, civitai_info: CivitAIModelInfo) -> None:
-        """Save CivitAI model info to the metadata manager."""
+    def _save_civitai_metadata(
+        self,
+        civitai_info: CivitAIModelInfo,
+        embedded_vae: str | None = None,
+    ) -> None:
+        """Save CivitAI model info to the metadata manager.
+        
+        Converts the CivitAI type string to our internal ModelType enum.
+        
+        Args:
+            civitai_info: The CivitAI model info to save.
+            embedded_vae: Optional embedded VAE identifier (e.g., "checkpoint_embedded").
+        """
         mgr = ModelMetadataManager(LORAS_MOUNT_PATH)
+        
+        # Map CivitAI type string to ModelType enum
+        model_type = map_civitai_type(civitai_info.model_type)
+        
         model_info = ModelInfo(
             filename=civitai_info.filename,
-            model_type=civitai_info.model_type,
+            model_type=model_type,  # Use the mapped ModelType enum
             name=civitai_info.name,
             civitai_model_id=civitai_info.model_id,
             civitai_version_id=civitai_info.version_id,
@@ -574,6 +728,7 @@ class DownloadService:
             tags=civitai_info.tags,
             source_url=f"https://civitai.com/models/{civitai_info.model_id}",
             size_bytes=civitai_info.size_bytes,
+            embedded_vae=embedded_vae,
         )
         mgr.add_model(model_info)
 
@@ -616,22 +771,41 @@ class DownloadService:
     @modal.method()
     def delete_user_model(self, filename: str, model_type: str = "lora") -> dict:
         """
-        Delete a user model (LoRA or checkpoint) from the volume.
+        Delete a user model (LoRA, checkpoint, embedding, or VAE) from the volume.
+
+        Args:
+            filename: The model filename to delete.
+            model_type: The model type as a string ("lora", "checkpoint", "embedding", "vae").
 
         Returns: ``{"success": bool, "error": str | None}``
         """
         from src.app_config import lora_volume  # noqa: F811
 
-        if model_type == "checkpoint":
-            file_path = os.path.join(LORAS_MOUNT_PATH, "checkpoints", filename)
-        else:
-            file_path = os.path.join(LORAS_MOUNT_PATH, "loras", filename)
+        # Map model_type string to subdirectory
+        type_to_subdir = {
+            "checkpoint": "checkpoints",
+            "lora": "loras",
+            "embedding": "embeddings",
+            "vae": "vae",
+        }
+        
+        subdir = type_to_subdir.get(model_type, "loras")
+        file_path = os.path.join(LORAS_MOUNT_PATH, subdir, filename)
 
-        # Also check flat path (legacy)
-        flat_path = os.path.join(LORAS_MOUNT_PATH, filename)
+        # Also check flat path (legacy) and other subdirs for backward compatibility
+        possible_paths = [
+            file_path,
+            os.path.join(LORAS_MOUNT_PATH, filename),  # Legacy flat path
+        ]
+        
+        # Also check other subdirectories in case of type mismatch
+        for other_subdir in type_to_subdir.values():
+            other_path = os.path.join(LORAS_MOUNT_PATH, other_subdir, filename)
+            if other_path not in possible_paths:
+                possible_paths.append(other_path)
 
         deleted = False
-        for path in [file_path, flat_path]:
+        for path in possible_paths:
             if os.path.exists(path):
                 os.remove(path)
                 logger.info("Deleted model file: %s", path)
@@ -656,6 +830,9 @@ class DownloadService:
         Scans both the metadata store and the filesystem so that files without
         metadata entries (orphans) are also returned.
 
+        Args:
+            model_type: Optional filter by model type ("lora", "checkpoint", "embedding", "vae").
+
         Returns a list of model info dicts.
         """
         from src.app_config import lora_volume  # noqa: F811
@@ -673,7 +850,7 @@ class DownloadService:
             d = {
                 "filename": m.filename,
                 "name": m.name,
-                "model_type": m.model_type,
+                "model_type": m.model_type.value if isinstance(m.model_type, ModelType) else m.model_type,
                 "trigger_words": m.trigger_words,
                 "base_model": m.base_model,
                 "default_weight": m.default_weight,
@@ -685,8 +862,17 @@ class DownloadService:
             }
             result.append(d)
 
-        # Scan for orphan files (no metadata)
-        for subdir_name, mtype in [("loras", "lora"), ("checkpoints", "checkpoint"), ("", "lora")]:
+        # Scan for orphan files (no metadata) in all subdirectories
+        # Map subdirectory names to model type strings
+        subdir_to_type = [
+            ("loras", "lora"),
+            ("checkpoints", "checkpoint"),
+            ("embeddings", "embedding"),
+            ("vae", "vae"),
+            ("", "lora"),  # Legacy flat path
+        ]
+        
+        for subdir_name, mtype in subdir_to_type:
             scan_dir = os.path.join(LORAS_MOUNT_PATH, subdir_name) if subdir_name else LORAS_MOUNT_PATH
             if not os.path.isdir(scan_dir):
                 continue

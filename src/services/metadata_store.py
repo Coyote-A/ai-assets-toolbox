@@ -111,3 +111,38 @@ class MetadataStore:
         if entry.get("repo_id") != expected_repo_id:
             return False
         return True
+    
+    # Active model selection
+    def get_active_checkpoint(self) -> str | None:
+        """Get the name of the currently active checkpoint.
+        
+        Returns the checkpoint filename, or None if no checkpoint is selected.
+        Special value "illustrious-xl" indicates the default HuggingFace model.
+        """
+        return self._dict.get("active_checkpoint")
+    
+    def set_active_checkpoint(self, name: str) -> None:
+        """Set the active checkpoint by name.
+        
+        Args:
+            name: Checkpoint filename or "illustrious-xl" for the default model.
+        """
+        self._dict["active_checkpoint"] = name
+    
+    def get_active_vae(self) -> str | None:
+        """Get the name of the currently active VAE (if custom).
+        
+        Returns None if using the checkpoint's embedded VAE or the default VAE.
+        """
+        return self._dict.get("active_vae")
+    
+    def set_active_vae(self, name: str | None) -> None:
+        """Set the active VAE by name.
+        
+        Args:
+            name: VAE filename to use, or None to use checkpoint's VAE/default.
+        """
+        if name:
+            self._dict["active_vae"] = name
+        elif "active_vae" in self._dict:
+            del self._dict["active_vae"]
