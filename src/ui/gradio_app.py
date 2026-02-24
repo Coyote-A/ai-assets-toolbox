@@ -41,6 +41,7 @@ import io
 import logging
 import os
 import tempfile
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import gradio as gr
@@ -530,11 +531,11 @@ def _tile_pil(tile: Dict[str, Any], use_processed: bool = False) -> Image.Image:
     return _bytes_to_pil(tile["original_bytes"])
 
 
-def _get_slider_images(tile: Dict[str, Any]) -> Optional[Tuple[Image.Image, Image.Image]]:
+def _get_slider_images(tile: Dict[str, Any]) -> Optional[Tuple[str, str]]:
     """Get original and processed images for ImageSlider.
     
     Returns None if the tile hasn't been processed yet.
-    Returns tuple of (original, processed) PIL Images for ImageSlider.
+    Returns tuple of (original_path, processed_path) as JPEG files for ImageSlider.
     """
     if not tile.get("processed_bytes"):
         return None
@@ -542,7 +543,16 @@ def _get_slider_images(tile: Dict[str, Any]) -> Optional[Tuple[Image.Image, Imag
     orig_img = _bytes_to_pil(tile["original_bytes"])
     proc_img = _bytes_to_pil(tile["processed_bytes"])
     
-    return (orig_img, proc_img)
+    # Save to temp JPEG files - Gradio ImageSlider needs file paths
+    tmp_dir = tempfile.gettempdir()
+    uid = uuid.uuid4().hex[:8]
+    orig_path = os.path.join(tmp_dir, f"slider_orig_{uid}.jpg")
+    proc_path = os.path.join(tmp_dir, f"slider_proc_{uid}.jpg")
+    
+    orig_img.save(orig_path, "JPEG", quality=95)
+    proc_img.save(proc_path, "JPEG", quality=95)
+    
+    return (orig_path, proc_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1308,7 +1318,7 @@ def _build_upscale_tab() -> None:
                         )
                         tile_proc_preview = gr.ImageSlider(
                             label="Original vs Processed",
-                            type="pil",
+                            type="filepath",
                             interactive=False,
                             height=200,
                         )

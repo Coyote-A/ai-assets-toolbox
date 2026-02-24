@@ -1,1 +1,1 @@
-{"mcpServers":{"gradio":{"command":"npx","args":["mcp-remote","https://gradio-docs-mcp.hf.space/gradio_api/mcp/"],"alwaysAllow":["docs_mcp_search_gradio_docs"]}}}
+{"mcpServers":{"gradio":{"command":"npx","args":["mcp-remote","https://gradio-docs-mcp.hf.space/gradio_api/mcp/"],"alwaysAllow":["docs_mcp_search_gradio_docs","docs_mcp_load_gradio_docs"]}}}
