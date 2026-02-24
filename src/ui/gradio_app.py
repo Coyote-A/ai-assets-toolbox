@@ -1150,9 +1150,11 @@ document.addEventListener('DOMContentLoaded', setupFullscreenInterceptor);
 </script>
 '''
 
-    demo = gr.Blocks(title="AI Assets Toolbox", head=jspatch)
+    demo = gr.Blocks(title="AI Assets Toolbox")
     demo.css = custom_css
     with demo:
+        # Inject fullscreen fix script via HTML component (works with ASGI)
+        gr.HTML(jspatch)
         
         gr.Markdown("# 🎨 AI Assets Toolbox")
         gr.Markdown(
