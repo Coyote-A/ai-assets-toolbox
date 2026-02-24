@@ -536,12 +536,22 @@ def _get_slider_images(tile: Dict[str, Any]) -> Optional[Tuple[str, str]]:
     
     Returns None if the tile hasn't been processed yet.
     Returns tuple of (original_path, processed_path) as JPEG files for ImageSlider.
+    Both images are resized to match dimensions for proper slider alignment.
     """
     if not tile.get("processed_bytes"):
         return None
     
     orig_img = _bytes_to_pil(tile["original_bytes"])
     proc_img = _bytes_to_pil(tile["processed_bytes"])
+    
+    # Ensure both images have the same dimensions - use the larger one
+    max_w = max(orig_img.width, proc_img.width)
+    max_h = max(orig_img.height, proc_img.height)
+    
+    if orig_img.size != (max_w, max_h):
+        orig_img = orig_img.resize((max_w, max_h), Image.LANCZOS)
+    if proc_img.size != (max_w, max_h):
+        proc_img = proc_img.resize((max_w, max_h), Image.LANCZOS)
     
     # Save to temp JPEG files - Gradio ImageSlider needs file paths
     tmp_dir = tempfile.gettempdir()
@@ -1320,7 +1330,8 @@ def _build_upscale_tab() -> None:
                             label="Original vs Processed",
                             type="filepath",
                             interactive=False,
-                            height=200,
+                            height=256,
+                            width=256,
                         )
                     tile_prompt_box = gr.Textbox(
                         label="Tile Prompt (appends to global prompt)",
