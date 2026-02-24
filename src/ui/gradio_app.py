@@ -1331,19 +1331,22 @@ def _build_upscale_tab() -> None:
                 with gr.Group():
                     gr.Markdown("### 📌 Selected Tile")
                     with gr.Row():
-                        tile_orig_preview = gr.Image(
-                            label="Original + Blend Zones",
-                            type="pil",
-                            interactive=False,
-                            height=200,
-                        )
-                        tile_proc_preview = gr.ImageSlider(
-                            label="Processed vs Original (slider to compare)",
-                            type="filepath",
-                            interactive=False,
-                            height=256,
-                            width=256,
-                        )
+                        with gr.Column(scale=0, min_width=256):
+                            tile_orig_preview = gr.Image(
+                                label="Original + Blend Zones",
+                                type="pil",
+                                interactive=False,
+                                height=256,
+                                width=256,
+                            )
+                        with gr.Column(scale=0, min_width=256):
+                            tile_proc_preview = gr.ImageSlider(
+                                label="Processed vs Original (slider to compare)",
+                                type="filepath",
+                                interactive=False,
+                                height=256,
+                                width=256,
+                            )
                     tile_prompt_box = gr.Textbox(
                         label="Tile Prompt (appends to global prompt)",
                         lines=2,
