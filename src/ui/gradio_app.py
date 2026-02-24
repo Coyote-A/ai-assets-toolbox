@@ -535,7 +535,8 @@ def _get_slider_images(tile: Dict[str, Any]) -> Optional[Tuple[str, str]]:
     """Get original and processed images for ImageSlider.
     
     Returns None if the tile hasn't been processed yet.
-    Returns tuple of (original_path, processed_path) as JPEG files for ImageSlider.
+    Returns tuple of (processed_path, original_path) as JPEG files for ImageSlider.
+    Note: Processed image is FIRST so download/fullscreen buttons use it.
     Both images are resized to match dimensions for proper slider alignment.
     """
     if not tile.get("processed_bytes"):
@@ -562,7 +563,8 @@ def _get_slider_images(tile: Dict[str, Any]) -> Optional[Tuple[str, str]]:
     orig_img.save(orig_path, "JPEG", quality=95)
     proc_img.save(proc_path, "JPEG", quality=95)
     
-    return (orig_path, proc_path)
+    # Return PROCESSED FIRST so download/fullscreen use processed image
+    return (proc_path, orig_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1336,7 +1338,7 @@ def _build_upscale_tab() -> None:
                             height=200,
                         )
                         tile_proc_preview = gr.ImageSlider(
-                            label="Original vs Processed",
+                            label="Processed vs Original (slider to compare)",
                             type="filepath",
                             interactive=False,
                             height=256,
