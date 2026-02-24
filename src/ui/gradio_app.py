@@ -1099,6 +1099,15 @@ def create_gradio_app() -> gr.Blocks:
     .gr-image { max-width: 100%; }
     .gr-image img { max-width: 100%; height: auto; object-fit: contain; }
     
+    /* ImageSlider alignment fix - remove margin auto that causes misalignment */
+    .slider-container img, .gr-image-slider img {
+        margin: 0 !important;
+        object-fit: contain !important;
+        position: absolute !important;
+        top: 0 !important;
+        left: 0 !important;
+    }
+    
     /* LoRA controls container */
     #upscale-lora-controls { max-height: 250px; overflow-y: auto; }
     
