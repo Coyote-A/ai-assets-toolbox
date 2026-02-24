@@ -213,7 +213,7 @@ class CaptionService:
 
         self._model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_dir,
-            dtype=torch.float16,
+            torch_dtype=torch.float16,
             device_map="auto",
             local_files_only=True,
         )

@@ -82,6 +82,11 @@ logger = logging.getLogger(__name__)
 LORAS_DIR = LORAS_MOUNT_PATH          # /vol/loras  — base volume path
 LORAS_SUBDIR = os.path.join(LORAS_MOUNT_PATH, "loras")  # /vol/loras/loras — new subdirectory
 
+# Model type subdirectories within the lora volume
+CHECKPOINTS_DIR = os.path.join(LORAS_MOUNT_PATH, "checkpoints")  # /vol/loras/checkpoints
+EMBEDDINGS_DIR = os.path.join(LORAS_MOUNT_PATH, "embeddings")    # /vol/loras/embeddings
+VAES_DIR = os.path.join(LORAS_MOUNT_PATH, "vae")                 # /vol/loras/vae
+
 # ---------------------------------------------------------------------------
 # UpscaleService
 # ---------------------------------------------------------------------------
@@ -210,7 +215,7 @@ class UpscaleService:
         logger.info("Loading SDXL VAE fp16-fix from '%s'", sdxl_vae_path)
         vae = AutoencoderKL.from_pretrained(
             sdxl_vae_path,
-            dtype=torch.float16,
+            torch_dtype=torch.float16,
             local_files_only=True,
         )
         logger.info("VAE loaded")
@@ -221,7 +226,7 @@ class UpscaleService:
         logger.info("Loading ControlNet Tile from '%s'", controlnet_tile_path)
         controlnet = ControlNetModel.from_pretrained(
             controlnet_tile_path,
-            dtype=torch.float16,
+            torch_dtype=torch.float16,
             local_files_only=True,
         )
         logger.info("ControlNet loaded")
@@ -233,7 +238,7 @@ class UpscaleService:
         logger.info("Loading SDXL base pipeline from '%s'", illustrious_xl_path)
         base_pipe = StableDiffusionXLImg2ImgPipeline.from_single_file(
             illustrious_xl_path,
-            dtype=torch.float16,
+            torch_dtype=torch.float16,
             use_safetensors=True,
             vae=vae,
         )
@@ -302,6 +307,385 @@ class UpscaleService:
         logger.info("=== UpscaleService: all models loaded ===")
 
     # ------------------------------------------------------------------
+    # Checkpoint / VAE / Embedding management (private)
+    # ------------------------------------------------------------------
+
+    # State tracking for currently loaded checkpoint
+    _current_checkpoint: Optional[str] = None      # Name of loaded checkpoint (None = default)
+    _current_checkpoint_path: Optional[str] = None  # Path to checkpoint file
+    _current_vae: Optional[str] = None              # Name of loaded VAE (None = default)
+    _has_embedded_vae: bool = False                 # Whether current checkpoint has embedded VAE
+    _loaded_embeddings: list[str] = []              # List of loaded embedding names
+
+    def _ensure_checkpoint(self, checkpoint_name: Optional[str] = None) -> None:
+        """
+        Ensure the correct checkpoint is loaded.
+
+        Parameters
+        ----------
+        checkpoint_name: Optional[str]
+            Name of checkpoint to load, or None for default Illustrious-XL.
+
+        Notes
+        -----
+        Checkpoint switching takes ~15-20 seconds. The loaded checkpoint is
+        cached to avoid reloading on subsequent calls with the same checkpoint.
+        """
+        # If no checkpoint specified, use default
+        if checkpoint_name is None:
+            if self._current_checkpoint is not None:
+                # Already loaded a custom checkpoint, need to reload default
+                self._load_default_checkpoint()
+            return
+
+        # Check if already loaded
+        if self._current_checkpoint == checkpoint_name:
+            logger.info("Checkpoint '%s' already loaded", checkpoint_name)
+            return
+
+        # Load the custom checkpoint
+        self._load_custom_checkpoint(checkpoint_name)
+
+    def _load_default_checkpoint(self) -> None:
+        """Load the default SDXL checkpoint (Illustrious-XL)."""
+        import torch
+        from diffusers import (
+            StableDiffusionXLImg2ImgPipeline,
+            StableDiffusionXLControlNetImg2ImgPipeline,
+            DPMSolverMultistepScheduler,
+        )
+
+        logger.info("Reloading default checkpoint (Illustrious-XL)")
+
+        # Get the default checkpoint path
+        illustrious_xl_path = get_model_file_path("illustrious-xl")
+        if illustrious_xl_path is None:
+            illustrious_xl_dir = get_model_path("illustrious-xl")
+            illustrious_xl_path = os.path.join(
+                illustrious_xl_dir, "Illustrious-XL-v2.0.safetensors"
+            )
+
+        # Get VAE path
+        sdxl_vae_path = get_model_path("sdxl-vae")
+
+        # Load VAE
+        from diffusers import AutoencoderKL
+        vae = AutoencoderKL.from_pretrained(
+            sdxl_vae_path,
+            torch_dtype=torch.float16,
+            local_files_only=True,
+        )
+
+        # Load base pipeline
+        base_pipe = StableDiffusionXLImg2ImgPipeline.from_single_file(
+            illustrious_xl_path,
+            torch_dtype=torch.float16,
+            use_safetensors=True,
+            vae=vae,
+        )
+
+        # Get ControlNet from current pipeline
+        controlnet = self._pipe.controlnet
+
+        # Wrap with ControlNet
+        self._pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pipe(
+            base_pipe,
+            controlnet=controlnet,
+        )
+
+        # Restore scheduler
+        self._pipe.scheduler = DPMSolverMultistepScheduler.from_config(
+            self._pipe.scheduler.config,
+            algorithm_type="sde-dpmsolver++",
+            use_karras_sigmas=True,
+        )
+
+        # Re-enable CPU offload
+        self._pipe.enable_model_cpu_offload()
+
+        # Move text encoders to CUDA for Compel
+        self._pipe.text_encoder.to("cuda")
+        self._pipe.text_encoder_2.to("cuda")
+
+        # Rebuild Compel
+        self._compel = _build_compel(self._pipe)
+
+        # Reload IP-Adapter if it was loaded
+        if self._ip_adapter_loaded:
+            self._reload_ip_adapter()
+
+        # Update tracking
+        self._current_checkpoint = None
+        self._current_checkpoint_path = None
+        self._current_vae = None
+        self._has_embedded_vae = False
+        self._loaded_embeddings = []
+
+        logger.info("Default checkpoint loaded successfully")
+
+    def _load_custom_checkpoint(self, checkpoint_name: str) -> None:
+        """
+        Load a custom checkpoint from the checkpoints directory.
+
+        Parameters
+        ----------
+        checkpoint_name: str
+            Filename of the checkpoint to load (with or without .safetensors extension).
+
+        Raises
+        ------
+        FileNotFoundError
+            If the checkpoint file is not found.
+        """
+        import torch
+        from diffusers import (
+            StableDiffusionXLImg2ImgPipeline,
+            StableDiffusionXLControlNetImg2ImgPipeline,
+            DPMSolverMultistepScheduler,
+            AutoencoderKL,
+        )
+
+        logger.info("Loading custom checkpoint: %s", checkpoint_name)
+
+        # Find checkpoint file
+        checkpoint_path = os.path.join(CHECKPOINTS_DIR, checkpoint_name)
+
+        if not os.path.exists(checkpoint_path):
+            # Try with .safetensors extension
+            checkpoint_path = os.path.join(CHECKPOINTS_DIR, f"{checkpoint_name}.safetensors")
+
+        if not os.path.exists(checkpoint_path):
+            # Try without any extension (in case user provided extension)
+            base_name = os.path.splitext(checkpoint_name)[0]
+            checkpoint_path = os.path.join(CHECKPOINTS_DIR, f"{base_name}.safetensors")
+
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_name}")
+
+        # Check if checkpoint has embedded VAE
+        has_embedded_vae = False
+        mgr = ModelMetadataManager(LORAS_MOUNT_PATH)
+        model_info = mgr.get_model(checkpoint_name)
+        if model_info and model_info.embedded_vae:
+            has_embedded_vae = True
+            logger.info(
+                "Checkpoint '%s' has embedded VAE: %s",
+                checkpoint_name,
+                model_info.embedded_vae,
+            )
+
+        # Load VAE (use default fp16-fixed VAE for custom checkpoints without embedded VAE)
+        vae = None
+        if not has_embedded_vae:
+            sdxl_vae_path = get_model_path("sdxl-vae")
+            vae = AutoencoderKL.from_pretrained(
+                sdxl_vae_path,
+                torch_dtype=torch.float16,
+                local_files_only=True,
+            )
+        else:
+            logger.info("Using checkpoint's embedded VAE instead of default VAE")
+
+        # Load base pipeline from checkpoint
+        base_pipe = StableDiffusionXLImg2ImgPipeline.from_single_file(
+            checkpoint_path,
+            torch_dtype=torch.float16,
+            use_safetensors=True,
+            vae=vae,  # None means use embedded VAE if present
+        )
+
+        # Get ControlNet from current pipeline
+        controlnet = self._pipe.controlnet
+
+        # Wrap with ControlNet
+        self._pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pipe(
+            base_pipe,
+            controlnet=controlnet,
+        )
+
+        # Set scheduler
+        self._pipe.scheduler = DPMSolverMultistepScheduler.from_config(
+            self._pipe.scheduler.config,
+            algorithm_type="sde-dpmsolver++",
+            use_karras_sigmas=True,
+        )
+
+        # Enable CPU offload
+        self._pipe.enable_model_cpu_offload()
+
+        # Move text encoders to CUDA for Compel
+        self._pipe.text_encoder.to("cuda")
+        self._pipe.text_encoder_2.to("cuda")
+
+        # Rebuild Compel
+        self._compel = _build_compel(self._pipe)
+
+        # Reload IP-Adapter if it was loaded
+        if self._ip_adapter_loaded:
+            self._reload_ip_adapter()
+
+        # Update tracking
+        self._current_checkpoint = checkpoint_name
+        self._current_checkpoint_path = checkpoint_path
+        self._current_vae = None
+        self._has_embedded_vae = has_embedded_vae
+        self._loaded_embeddings = []
+
+        logger.info("Custom checkpoint loaded: %s (embedded_vae=%s)", checkpoint_name, has_embedded_vae)
+
+    def _reload_ip_adapter(self) -> None:
+        """Reload IP-Adapter after checkpoint switch."""
+        ip_adapter_path = get_model_file_path("ip-adapter")
+        if ip_adapter_path is None:
+            ip_adapter_dir = get_model_path("ip-adapter")
+            ip_adapter_path = os.path.join(
+                ip_adapter_dir, "ip-adapter-plus_sdxl_vit-h.safetensors"
+            )
+        clip_vit_h_path = get_model_path("clip-vit-h")
+
+        try:
+            self._pipe.load_ip_adapter(
+                os.path.dirname(ip_adapter_path),
+                subfolder="",
+                weight_name=os.path.basename(ip_adapter_path),
+                image_encoder_folder=clip_vit_h_path,
+            )
+            if hasattr(self._pipe, "image_encoder") and self._pipe.image_encoder is not None:
+                self._pipe.image_encoder.to("cuda")
+            self._pipe.set_ip_adapter_scale(0.0)
+            logger.info("IP-Adapter reloaded after checkpoint switch")
+        except Exception as exc:
+            logger.warning("Failed to reload IP-Adapter after checkpoint switch: %s", exc)
+            self._ip_adapter_loaded = False
+
+    def _load_vae(self, vae_name: Optional[str] = None) -> None:
+        """
+        Load a custom VAE or use checkpoint's embedded VAE.
+
+        Parameters
+        ----------
+        vae_name: Optional[str]
+            Name of VAE to load, or None for default/embedded VAE.
+        """
+        from diffusers import AutoencoderKL
+        import torch
+
+        if vae_name is None:
+            # If checkpoint has embedded VAE, use it (already loaded with checkpoint)
+            if self._has_embedded_vae:
+                logger.info("Using checkpoint's embedded VAE")
+                self._current_vae = None
+                return
+            # Use default VAE (already in pipeline)
+            if self._current_vae is not None:
+                logger.info("Switching back to default VAE")
+                self._current_vae = None
+            return
+
+        # Check if already loaded
+        if self._current_vae == vae_name:
+            logger.info("VAE '%s' already loaded", vae_name)
+            return
+
+        # Warn if overriding embedded VAE
+        if self._has_embedded_vae:
+            logger.info("Overriding checkpoint's embedded VAE with custom VAE: %s", vae_name)
+
+        vae_path = os.path.join(VAES_DIR, vae_name)
+        if not os.path.exists(vae_path):
+            vae_path = os.path.join(VAES_DIR, f"{vae_name}.safetensors")
+
+        if not os.path.exists(vae_path):
+            # Try without extension
+            base_name = os.path.splitext(vae_name)[0]
+            vae_path = os.path.join(VAES_DIR, f"{base_name}.safetensors")
+
+        if not os.path.exists(vae_path):
+            logger.warning("VAE not found: %s, using default", vae_name)
+            return
+
+        logger.info("Loading VAE: %s", vae_name)
+
+        try:
+            vae = AutoencoderKL.from_single_file(vae_path, torch_dtype=torch.float16)
+            self._pipe.vae = vae
+            self._current_vae = vae_name
+            logger.info("VAE loaded: %s", vae_name)
+        except Exception as exc:
+            logger.warning("Failed to load VAE '%s': %s", vae_name, exc)
+
+    def _load_embeddings(self, embedding_names: Optional[list[str]] = None) -> None:
+        """
+        Load textual inversion embeddings.
+
+        Parameters
+        ----------
+        embedding_names: Optional[list[str]]
+            List of embedding filenames to load.
+        """
+        if not embedding_names:
+            return
+
+        for emb_name in embedding_names:
+            if emb_name in self._loaded_embeddings:
+                logger.info("Embedding '%s' already loaded", emb_name)
+                continue
+
+            emb_path = os.path.join(EMBEDDINGS_DIR, emb_name)
+            if not os.path.exists(emb_path):
+                # Try with common extensions
+                for ext in [".pt", ".safetensors", ".bin"]:
+                    test_path = os.path.join(EMBEDDINGS_DIR, f"{emb_name}{ext}")
+                    if os.path.exists(test_path):
+                        emb_path = test_path
+                        break
+
+            if not os.path.exists(emb_path):
+                # Try without extension
+                base_name = os.path.splitext(emb_name)[0]
+                for ext in [".pt", ".safetensors", ".bin"]:
+                    test_path = os.path.join(EMBEDDINGS_DIR, f"{base_name}{ext}")
+                    if os.path.exists(test_path):
+                        emb_path = test_path
+                        break
+
+            if not os.path.exists(emb_path):
+                logger.warning("Embedding not found: %s", emb_name)
+                continue
+
+            logger.info("Loading embedding: %s", emb_name)
+
+            try:
+                # Load embedding - diffusers handles this automatically
+                self._pipe.load_textual_inversion(emb_path)
+                self._loaded_embeddings.append(emb_name)
+                logger.info("Embedding loaded: %s", emb_name)
+            except Exception as exc:
+                logger.warning("Failed to load embedding '%s': %s", emb_name, exc)
+
+    def _clear_embeddings(self) -> None:
+        """Clear all loaded embeddings."""
+        if not self._loaded_embeddings:
+            return
+
+        logger.info("Unloading embeddings: %s", self._loaded_embeddings)
+        try:
+            # Unload all embeddings by name
+            for emb_name in self._loaded_embeddings:
+                try:
+                    # Get the token name used by the embedding
+                    # Textual inversion embeddings are stored with their trigger word
+                    self._pipe.unload_textual_inversion()
+                except Exception as exc:
+                    logger.debug("Could not unload embedding '%s': %s", emb_name, exc)
+
+            self._loaded_embeddings = []
+            logger.info("All embeddings unloaded")
+        except Exception as exc:
+            logger.warning("Error unloading embeddings: %s", exc)
+            self._loaded_embeddings = []
+
+    # ------------------------------------------------------------------
     # Public Modal methods — upscale
     # ------------------------------------------------------------------
 
@@ -318,6 +702,9 @@ class UpscaleService:
         ip_adapter_scale: float = 0.6,
         target_width: Optional[int] = None,
         target_height: Optional[int] = None,
+        checkpoint_name: Optional[str] = None,
+        vae_name: Optional[str] = None,
+        embedding_names: Optional[list[str]] = None,
     ) -> list[dict]:
         """
         Process image tiles through the SDXL img2img pipeline.
@@ -353,6 +740,12 @@ class UpscaleService:
             IP-Adapter influence scale (0.0–1.0).
         target_width, target_height:
             Optional explicit output dimensions for each tile.
+        checkpoint_name:
+            Name of custom checkpoint to load, or None for default Illustrious-XL.
+        vae_name:
+            Name of custom VAE to load, or None for default.
+        embedding_names:
+            List of textual inversion embedding filenames to load.
 
         Returns
         -------
@@ -401,14 +794,28 @@ class UpscaleService:
 
         logger.info(
             "upscale_tiles: tiles=%d steps=%d strength=%.2f controlnet=%s "
-            "ip_adapter=%s target=%s clip_skip=%d",
+            "ip_adapter=%s target=%s clip_skip=%d checkpoint=%s vae=%s embeddings=%s",
             len(tiles),
             steps,
             strength,
             controlnet_enabled,
             ip_adapter_enabled,
             f"{target_width}x{target_height}" if target_width and target_height else "from_image",
+            checkpoint_name or "default",
+            vae_name or "default",
+            embedding_names or [],
         )
+
+        # Ensure correct checkpoint is loaded
+        self._ensure_checkpoint(checkpoint_name)
+
+        # Load custom VAE if specified
+        if vae_name:
+            self._load_vae(vae_name)
+
+        # Load embeddings if specified
+        if embedding_names:
+            self._load_embeddings(embedding_names)
 
         # Inject trigger words for active LoRAs into the global prompt
         global_prompt = _inject_trigger_words(global_prompt, loras, LORAS_DIR)
@@ -511,6 +918,9 @@ class UpscaleService:
         ip_adapter_scale: float = 0.6,
         target_width: Optional[int] = None,
         target_height: Optional[int] = None,
+        checkpoint_name: Optional[str] = None,
+        vae_name: Optional[str] = None,
+        embedding_names: Optional[list[str]] = None,
     ) -> dict:
         """
         Process a batch of tiles through the SDXL img2img pipeline.
@@ -543,6 +953,12 @@ class UpscaleService:
             IP-Adapter influence scale (0.0–1.0).
         target_width, target_height: Optional[int]
             Optional explicit output dimensions for each tile.
+        checkpoint_name: Optional[str]
+            Name of custom checkpoint to load, or None for default.
+        vae_name: Optional[str]
+            Name of custom VAE to load, or None for default.
+        embedding_names: Optional[list[str]]
+            List of textual inversion embedding filenames to load.
 
         Returns
         -------
@@ -595,7 +1011,7 @@ class UpscaleService:
 
         logger.info(
             "process_tile_batch: batch_id=%d tiles=%d steps=%d strength=%.2f controlnet=%s "
-            "ip_adapter=%s target=%s clip_skip=%d",
+            "ip_adapter=%s target=%s clip_skip=%d checkpoint=%s vae=%s embeddings=%s",
             batch_id,
             len(tiles),
             steps,
@@ -604,7 +1020,21 @@ class UpscaleService:
             ip_adapter_enabled,
             f"{target_width}x{target_height}" if target_width and target_height else "from_image",
             clip_skip,
+            checkpoint_name or "default",
+            vae_name or "default",
+            embedding_names or [],
         )
+
+        # Ensure correct checkpoint is loaded
+        self._ensure_checkpoint(checkpoint_name)
+
+        # Load custom VAE if specified
+        if vae_name:
+            self._load_vae(vae_name)
+
+        # Load embeddings if specified
+        if embedding_names:
+            self._load_embeddings(embedding_names)
 
         # Inject trigger words for active LoRAs into the global prompt
         global_prompt = _inject_trigger_words(global_prompt, loras, LORAS_DIR)
@@ -725,6 +1155,9 @@ class UpscaleService:
         ip_adapter_scale: float = 0.6,
         target_width: Optional[int] = None,
         target_height: Optional[int] = None,
+        checkpoint_name: Optional[str] = None,
+        vae_name: Optional[str] = None,
+        embedding_names: Optional[list[str]] = None,
     ) -> list[dict]:
         """
         Process image regions through the SDXL img2img pipeline.
@@ -759,6 +1192,12 @@ class UpscaleService:
             IP-Adapter influence scale.
         target_width, target_height:
             Optional explicit output dimensions for each region.
+        checkpoint_name:
+            Name of custom checkpoint to load, or None for default.
+        vae_name:
+            Name of custom VAE to load, or None for default.
+        embedding_names:
+            List of textual inversion embedding filenames to load.
 
         Returns
         -------
@@ -808,14 +1247,28 @@ class UpscaleService:
 
         logger.info(
             "upscale_regions: regions=%d steps=%d strength=%.2f controlnet=%s "
-            "ip_adapter=%s target=%s",
+            "ip_adapter=%s target=%s checkpoint=%s vae=%s embeddings=%s",
             len(regions),
             steps,
             strength,
             controlnet_enabled,
             ip_adapter_enabled,
             f"{target_width}x{target_height}" if target_width and target_height else "from_image",
+            checkpoint_name or "default",
+            vae_name or "default",
+            embedding_names or [],
         )
+
+        # Ensure correct checkpoint is loaded
+        self._ensure_checkpoint(checkpoint_name)
+
+        # Load custom VAE if specified
+        if vae_name:
+            self._load_vae(vae_name)
+
+        # Load embeddings if specified
+        if embedding_names:
+            self._load_embeddings(embedding_names)
 
         # Inject trigger words for active LoRAs into the global prompt
         global_prompt = _inject_trigger_words(global_prompt, loras, LORAS_DIR)
