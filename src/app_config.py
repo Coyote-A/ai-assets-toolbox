@@ -141,6 +141,14 @@ lora_volume = modal.Volume.from_name(LORAS_VOLUME_NAME, create_if_missing=True)
 token_store = modal.Dict.from_name("ai-toolbox-tokens", create_if_missing=True)
 
 # ---------------------------------------------------------------------------
+# Settings storage (Modal Dict for UI settings persistence)
+# ---------------------------------------------------------------------------
+# Stores upscale tab settings that persist across server restarts.
+# Used by src.services.settings_store for get_upscale_settings/save_upscale_settings.
+
+settings_store = modal.Dict.from_name("ai-toolbox-settings", create_if_missing=True)
+
+# ---------------------------------------------------------------------------
 # Metadata extraction cache (Modal Dict for LLM response caching)
 # ---------------------------------------------------------------------------
 # Caches extracted metadata from model descriptions to avoid repeated LLM calls.

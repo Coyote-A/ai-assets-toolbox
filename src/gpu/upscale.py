@@ -480,12 +480,37 @@ class UpscaleService:
             controlnet=controlnet,
         )
 
+        # Ensure vae is not None in the new pipeline (prevents AttributeError in prepare_latents)
+        if self._pipe.vae is None:
+            if base_pipe.vae is not None:
+                self._pipe.vae = base_pipe.vae
+            else:
+                # If both pipelines have None vae, load the default VAE
+                logger.warning("Both pipelines have None VAE, loading default SDXL VAE")
+                sdxl_vae_path = get_model_path("sdxl-vae")
+                # Get device and dtype from existing pipeline components
+                device = next(base_pipe.text_encoder.parameters()).device
+                self._pipe.vae = AutoencoderKL.from_pretrained(
+                    sdxl_vae_path,
+                    torch_dtype=torch.float16,
+                    local_files_only=True,
+                ).to(device=device, dtype=torch.float16)
+
         # Set scheduler
         self._pipe.scheduler = DPMSolverMultistepScheduler.from_config(
             self._pipe.scheduler.config,
             algorithm_type="sde-dpmsolver++",
             use_karras_sigmas=True,
         )
+
+        # Ensure entire pipeline is in float16
+        self._pipe.to(dtype=torch.float16)
+        if hasattr(self._pipe, 'controlnet') and self._pipe.controlnet is not None:
+            self._pipe.controlnet.to(dtype=torch.float16)
+        
+        # Disable VAE force_upcast to prevent dtype mismatches
+        if hasattr(self._pipe.vae.config, "force_upcast"):
+            self._pipe.vae.config.force_upcast = False
 
         # Enable CPU offload
         self._pipe.enable_model_cpu_offload()
@@ -2004,13 +2029,22 @@ def _run_sdxl(
     import torch
 
     generator = torch.Generator(device="cuda").manual_seed(seed)
+    # Convert image to tensor and ensure it matches pipeline's dtype
+    from torchvision import transforms
+    transform = transforms.ToTensor()
+    image_tensor = transform(image).unsqueeze(0)  # Add batch dimension
+    image_tensor = image_tensor.to(device="cuda", dtype=torch.float16)
     kwargs: dict[str, Any] = {
-        "image": image,
+        "image": image_tensor,
         "strength": strength,
         "num_inference_steps": steps,
         "guidance_scale": cfg_scale,
         "generator": generator,
     }
+
+    # Convert control image to tensor with correct dtype
+    control_image_tensor = transform(image).unsqueeze(0)
+    control_image_tensor = control_image_tensor.to(device="cuda", dtype=torch.float16)
 
     # ------------------------------------------------------------------
     # Prompt encoding — use compel for long-prompt support when available
@@ -2041,7 +2075,7 @@ def _run_sdxl(
     # ControlNet conditioning — always pass control_image (required by the
     # ControlNet pipeline); set scale to 0 when ControlNet is disabled so
     # the pipeline still runs without errors.
-    kwargs["control_image"] = image
+    kwargs["control_image"] = control_image_tensor
     kwargs["controlnet_conditioning_scale"] = (
         controlnet_conditioning_scale if controlnet_enabled else 0.0
     )

@@ -537,7 +537,7 @@ class DownloadService:
     # ------------------------------------------------------------------
 
     @modal.method()
-    def download_civitai_model(self, user_input: str, civitai_token: str | None = None) -> dict:
+    def download_civitai_model(self, user_input: str, civitai_token: str | None = None, model_type: str | None = None) -> dict:
         """
         Download a model from CivitAI by URL, model ID, or version ID.
 
@@ -565,11 +565,20 @@ class DownloadService:
             return {"success": False, "model_info": None, "error": "Failed to fetch model info from CivitAI"}
 
         # Step 3: Determine target path based on model type
-        # Map CivitAI type string to our ModelType enum
-        model_type = map_civitai_type(civitai_info.model_type)
+        # Use provided model type if available, otherwise auto-detect
+        if model_type:
+            from src.services.model_metadata import ModelType
+            try:
+                parsed_model_type = ModelType(model_type)
+                logger.info("Using provided model type: %s", model_type)
+            except ValueError:
+                logger.warning("Invalid model type: %s, auto-detecting instead", model_type)
+                parsed_model_type = map_civitai_type(civitai_info.model_type)
+        else:
+            parsed_model_type = map_civitai_type(civitai_info.model_type)
         
         # Get the storage path for this model type
-        relative_path = get_model_path(model_type, civitai_info.filename)
+        relative_path = get_model_path(parsed_model_type, civitai_info.filename)
         target_path = os.path.join(LORAS_MOUNT_PATH, relative_path)
         
         # Ensure the subdirectory exists
@@ -578,7 +587,7 @@ class DownloadService:
         
         logger.info(
             "Model type: %s -> %s, storing at: %s",
-            civitai_info.model_type, model_type.value, target_path
+            civitai_info.model_type, parsed_model_type.value, target_path
         )
 
         # Check if already exists

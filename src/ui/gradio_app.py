@@ -47,6 +47,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import gradio as gr
 from PIL import Image
 
+from src.services.settings_store import get_upscale_settings, save_upscale_settings
+
 from src.tiling import (
     TileInfo,
     calculate_tiles,
@@ -1151,7 +1153,29 @@ def create_gradio_app() -> gr.Blocks:
         # ------------------------------------------------------------------
         with gr.Group(visible=False) as tool_group:
             with gr.Tabs():
-                _build_upscale_tab()
+                (
+                    upscale_tab,
+                    lora_controls_html,
+                    available_loras_state,
+                    lora_selections_state,
+                    checkpoint_dropdown,
+                    available_checkpoints_state,
+                    tile_size_num,
+                    overlap_num,
+                    gen_res_dd,
+                    global_prompt,
+                    negative_prompt,
+                    strength_sl,
+                    steps_sl,
+                    cfg_sl,
+                    controlnet_cb,
+                    cond_scale_sl,
+                    ip_adapter_cb,
+                    ip_scale_sl,
+                    seam_fix_cb,
+                    seam_fix_strength_sl,
+                    seam_fix_feather_sl,
+                ) = _build_upscale_tab()
                 _build_model_manager_tab()
                 (
                     settings_hf_token_input,
@@ -1186,11 +1210,12 @@ def create_gradio_app() -> gr.Blocks:
         )
 
         # ------------------------------------------------------------------
-        # Single combined page-load handler — three responsibilities:
+        # Single combined page-load handler — responsibilities:
         #   1. Restore saved API tokens from server-side storage into the textboxes.
         #   2. Skip the wizard entirely if all models are already downloaded.
         #   3. Skip Step 1 and go directly to Step 2 if tokens are saved but
         #      models are not yet downloaded.
+        #   4. Initialize upscale tab: load LoRAs, checkpoints, and saved settings.
         #
         # on_load_outputs_wizard contains:
         #   [0] hf_token_input textbox (wizard)
@@ -1215,11 +1240,107 @@ def create_gradio_app() -> gr.Blocks:
             + on_load_outputs_wizard[6:] # step1_group, step2_group, step3_group, step4_group
             + [settings_hf_token_input, settings_civitai_token_input,
                settings_hf_status_html, settings_civitai_status_html]  # settings tab
+            # Upscale tab components follow (added below after defining the handler)
         )
 
+        # ------------------------------------------------------------------
+        # Combined on_load handler: wizard + upscale tab initialization
+        # ------------------------------------------------------------------
+        def _combined_on_load():
+            """Combined page-load handler for wizard and upscale tab."""
+            # 1. Call the wizard's on_load handler for tokens and model status
+            wizard_outputs = on_load_fn()
+            
+            # 2. Initialize upscale tab components
+            from src.services.download import DownloadService
+            from src.services.settings_store import get_upscale_settings
+            
+            # Fetch LoRAs and checkpoints from the download service
+            loras = []
+            checkpoints = []
+            try:
+                loras = DownloadService().list_user_models.remote("lora")
+            except Exception:
+                pass
+            try:
+                checkpoints = DownloadService().list_user_models.remote("checkpoint")
+            except Exception:
+                pass
+            
+            # Load saved settings
+            settings = get_upscale_settings()
+            
+            # Build LoRA controls HTML
+            default_sels = settings.lora_selections or []
+            html = _build_lora_controls_html(loras, default_sels)
+            
+            # Build checkpoint choices (consistent with on_upscale_tab_select)
+            ckpt_choices = [("Default (Illustrious-XL)", None)]
+            for cp in checkpoints:
+                name = cp.get("name") or cp.get("filename", "Unknown")
+                filename = cp.get("filename", "")
+                ckpt_choices.append((name, filename))
+            
+            # Determine checkpoint value
+            ckpt_value = settings.checkpoint_name  # This is the filename of the saved checkpoint
+            # If saved checkpoint is not in available choices, use default
+            if ckpt_value not in [value for (name, value) in ckpt_choices]:
+                ckpt_value = None
+            
+            # Return wizard outputs + upscale tab outputs
+            # wizard_outputs has 14 elements (10 wizard + 4 settings)
+            # We need to add 21 upscale outputs
+            return (
+                *wizard_outputs,  # 14 outputs from wizard
+                html,             # lora_controls_html
+                loras,            # available_loras_state
+                default_sels,     # lora_selections_state
+                gr.update(choices=ckpt_choices, value=ckpt_value),  # checkpoint_dropdown
+                checkpoints,      # available_checkpoints_state
+                settings.tile_size,           # tile_size_num
+                settings.overlap,             # overlap_num
+                settings.gen_resolution,      # gen_res_dd
+                settings.global_prompt,       # global_prompt
+                settings.negative_prompt,     # negative_prompt
+                settings.denoise_strength,    # strength_sl
+                settings.steps,               # steps_sl
+                settings.cfg_scale,           # cfg_sl
+                settings.controlnet_enabled,  # controlnet_cb
+                settings.conditioning_scale,  # cond_scale_sl
+                settings.ip_adapter_enabled,  # ip_adapter_cb
+                settings.ip_adapter_scale,    # ip_scale_sl
+                settings.seam_fix_enabled,    # seam_fix_cb
+                settings.seam_fix_strength,   # seam_fix_strength_sl
+                settings.seam_fix_feather,    # seam_fix_feather_sl
+            )
+
+        # Add upscale tab components to outputs
+        full_on_load_outputs = full_on_load_outputs + [
+            lora_controls_html,
+            available_loras_state,
+            lora_selections_state,
+            checkpoint_dropdown,
+            available_checkpoints_state,
+            tile_size_num,
+            overlap_num,
+            gen_res_dd,
+            global_prompt,
+            negative_prompt,
+            strength_sl,
+            steps_sl,
+            cfg_sl,
+            controlnet_cb,
+            cond_scale_sl,
+            ip_adapter_cb,
+            ip_scale_sl,
+            seam_fix_cb,
+            seam_fix_strength_sl,
+            seam_fix_feather_sl,
+        ]
+
         demo.load(
-            fn=on_load_fn,
-            inputs=on_load_inputs,
+            fn=_combined_on_load,
+            inputs=[],
             outputs=full_on_load_outputs,
         )
 
@@ -1231,8 +1352,93 @@ def create_gradio_app() -> gr.Blocks:
 # ---------------------------------------------------------------------------
 
 
-def _build_upscale_tab() -> None:
-    """Render the Tile Upscale tab inside a Gradio Blocks context."""
+def _build_lora_controls_html(loras: List[Dict], selections: List[Dict]) -> str:
+    """
+    Render interactive LoRA controls as HTML.
+
+    Each LoRA gets a checkbox (enabled) and a weight display.
+    Selections are stored in *lora_selections_state* via the hidden
+    textbox using JS.
+    """
+    if not loras:
+        return (
+            "<p style='color:#888;font-style:italic;font-size:0.9em;'>"
+            "No LoRAs installed. Download from CivitAI or upload a file.</p>"
+        )
+
+    # Build a lookup for current selections
+    sel_map: Dict[str, Dict] = {s["name"]: s for s in selections}
+
+    rows: List[str] = []
+    rows.append(
+        "<style>"
+        ".lora-row{display:flex;align-items:center;gap:10px;padding:6px 0;"
+        "border-bottom:1px solid #333;}"
+        ".lora-row:last-child{border-bottom:none;}"
+        ".lora-name{flex:1;font-size:0.95em;color:#ddd;}"
+        ".lora-triggers{font-size:0.78em;color:#888;margin-top:2px;}"
+        ".lora-weight-label{font-size:0.82em;color:#aaa;min-width:60px;text-align:right;}"
+        "</style>"
+    )
+    rows.append('<div style="border:1px solid #444;border-radius:8px;padding:8px 12px;max-height:300px;overflow-y:auto;">')
+
+    for lora in loras:
+        name = lora.get("name") or lora.get("filename", "Unknown")
+        filename = lora.get("filename", "")
+        triggers = lora.get("trigger_words") or []
+        trigger_str = ", ".join(triggers) if triggers else "(no triggers)"
+        default_weight = lora.get("default_weight", 1.0)
+        sel = sel_map.get(name, {})
+        enabled = sel.get("enabled", True)
+        weight = sel.get("weight", default_weight)
+        checked = "checked" if enabled else ""
+        # JS: update the hidden textbox with the full selections JSON
+        # data-name holds the display name; data-filename holds the actual file name
+        js_update = (
+            "function updateLoraSelections(){"
+            "  var rows = document.querySelectorAll('.lora-row-item');"
+            "  var sels = [];"
+            "  rows.forEach(function(row){"
+            "    var cb = row.querySelector('input[type=checkbox]');"
+            "    var sl = row.querySelector('input[type=range]');"
+            "    var lbl = row.querySelector('.lora-weight-label');"
+            "    if(cb && sl){"
+            "      sels.push({name:cb.dataset.name,filename:cb.dataset.filename||'',"
+            "                 enabled:cb.checked,weight:parseFloat(sl.value)});"
+            "      if(lbl) lbl.textContent = parseFloat(sl.value).toFixed(1);"
+            "    }"
+            "  });"
+            "  var tb = document.getElementById('upscale-lora-selection');"
+            "  if(tb){"
+            "    var ta = tb.querySelector('textarea') || tb.querySelector('input');"
+            "    if(ta){ta.value=JSON.stringify(sels);"
+            "      ta.dispatchEvent(new Event('input'));}"
+            "  }"
+            "}"
+        )
+        rows.append(
+            f'<div class="lora-row lora-row-item">'
+            f'  <input type="checkbox" data-name="{name}" data-filename="{filename}" {checked}'
+            f'    onchange="({js_update})();">'
+            f'  <div class="lora-name">'
+            f'    <div>{name}</div>'
+            f'    <div class="lora-triggers">Triggers: {trigger_str}</div>'
+            f'  </div>'
+            f'  <input type="range" min="0" max="2" step="0.1" value="{weight:.1f}"'
+            f'    style="width:100px;" oninput="({js_update})();">'
+            f'  <span class="lora-weight-label">{weight:.1f}</span>'
+            f'</div>'
+        )
+    rows.append("</div>")
+    return "".join(rows)
+
+
+def _build_upscale_tab() -> Tuple:
+    """Render the Tile Upscale tab inside a Gradio Blocks context.
+    
+    Returns:
+        Tuple of UI components needed for the page load handler and settings persistence.
+    """
 
     upscale_tab = gr.Tab("🖼️ Tile Upscale")
     with upscale_tab:
@@ -1604,9 +1810,9 @@ def _build_upscale_tab() -> None:
                         info="Width of the gradient blend zone at tile edges.",
                     )
 
-        # ================================================================
-        # Event handlers
-        # ================================================================
+       # ================================================================
+       # Event handlers
+       # ================================================================
 
         # ----------------------------------------------------------------
         # Image upload → calculate tiles → build HTML tile grid
@@ -1699,88 +1905,6 @@ def _build_upscale_tab() -> None:
         # ----------------------------------------------------------------
         # LoRA list helpers
         # ----------------------------------------------------------------
-
-        def _build_lora_controls_html(loras: List[Dict], selections: List[Dict]) -> str:
-            """
-            Render interactive LoRA controls as HTML.
-
-            Each LoRA gets a checkbox (enabled) and a weight display.
-            Selections are stored in *lora_selections_state* via the hidden
-            textbox using JS.
-            """
-            import json as _json
-
-            if not loras:
-                return (
-                    "<p style='color:#888;font-style:italic;font-size:0.9em;'>"
-                    "No LoRAs installed. Download from CivitAI or upload a file.</p>"
-                )
-
-            # Build a lookup for current selections
-            sel_map: Dict[str, Dict] = {s["name"]: s for s in selections}
-
-            rows: List[str] = []
-            rows.append(
-                "<style>"
-                ".lora-row{display:flex;align-items:center;gap:10px;padding:6px 0;"
-                "border-bottom:1px solid #333;}"
-                ".lora-row:last-child{border-bottom:none;}"
-                ".lora-name{flex:1;font-size:0.95em;color:#ddd;}"
-                ".lora-triggers{font-size:0.78em;color:#888;margin-top:2px;}"
-                ".lora-weight-label{font-size:0.82em;color:#aaa;min-width:60px;text-align:right;}"
-                "</style>"
-            )
-            rows.append('<div style="border:1px solid #444;border-radius:8px;padding:8px 12px;max-height:300px;overflow-y:auto;">')
-
-            for lora in loras:
-                name = lora.get("name") or lora.get("filename", "Unknown")
-                filename = lora.get("filename", "")
-                triggers = lora.get("trigger_words") or []
-                trigger_str = ", ".join(triggers) if triggers else "(no triggers)"
-                default_weight = lora.get("default_weight", 1.0)
-                sel = sel_map.get(name, {})
-                enabled = sel.get("enabled", True)
-                weight = sel.get("weight", default_weight)
-                checked = "checked" if enabled else ""
-                # JS: update the hidden textbox with the full selections JSON
-                # data-name holds the display name; data-filename holds the actual file name
-                js_update = (
-                    "function updateLoraSelections(){"
-                    "  var rows = document.querySelectorAll('.lora-row-item');"
-                    "  var sels = [];"
-                    "  rows.forEach(function(row){"
-                    "    var cb = row.querySelector('input[type=checkbox]');"
-                    "    var sl = row.querySelector('input[type=range]');"
-                    "    var lbl = row.querySelector('.lora-weight-label');"
-                    "    if(cb && sl){"
-                    "      sels.push({name:cb.dataset.name,filename:cb.dataset.filename||'',"
-                    "                 enabled:cb.checked,weight:parseFloat(sl.value)});"
-                    "      if(lbl) lbl.textContent = parseFloat(sl.value).toFixed(1);"
-                    "    }"
-                    "  });"
-                    "  var tb = document.getElementById('upscale-lora-selection');"
-                    "  if(tb){"
-                    "    var ta = tb.querySelector('textarea') || tb.querySelector('input');"
-                    "    if(ta){ta.value=JSON.stringify(sels);"
-                    "      ta.dispatchEvent(new Event('input'));}"
-                    "  }"
-                    "}"
-                )
-                rows.append(
-                    f'<div class="lora-row lora-row-item">'
-                    f'  <input type="checkbox" data-name="{name}" data-filename="{filename}" {checked}'
-                    f'    onchange="({js_update})();">'
-                    f'  <div class="lora-name">'
-                    f'    <div>{name}</div>'
-                    f'    <div class="lora-triggers">Triggers: {trigger_str}</div>'
-                    f'  </div>'
-                    f'  <input type="range" min="0" max="2" step="0.1" value="{weight:.1f}"'
-                    f'    style="width:100px;" oninput="({js_update})();">'
-                    f'  <span class="lora-weight-label">{weight:.1f}</span>'
-                    f'</div>'
-                )
-            rows.append("</div>")
-            return "".join(rows)
 
         def _parse_lora_selections(
             selection_json: str,
@@ -1908,7 +2032,7 @@ def _build_upscale_tab() -> None:
         upscale_tab.select(
             fn=on_upscale_tab_select,
             inputs=[],
-            outputs=[lora_controls_html, available_loras_state, lora_selections_state, 
+            outputs=[lora_controls_html, available_loras_state, lora_selections_state,
                      checkpoint_dropdown, available_checkpoints_state],
         )
 
@@ -1923,6 +2047,61 @@ def _build_upscale_tab() -> None:
             inputs=[lora_selection_tb, available_loras_state],
             outputs=[lora_selections_state],
         )
+
+        # ----------------------------------------------------------------
+        # Settings change handlers - save settings when they change
+        # ----------------------------------------------------------------
+        def on_settings_change(
+            tile_size, overlap, gen_res,
+            checkpoint, global_prompt, negative_prompt,
+            strength, steps, cfg,
+            controlnet_enabled, cond_scale,
+            ip_enabled, ip_scale,
+            seam_enabled, seam_strength, seam_feather,
+            lora_selections,
+        ):
+            """Save all settings when any setting changes."""
+            from src.services.settings_store import UpscaleSettings, save_upscale_settings
+            
+            settings = UpscaleSettings(
+                tile_size=int(tile_size),
+                overlap=int(overlap),
+                gen_resolution=gen_res,
+                checkpoint_name=checkpoint,
+                global_prompt=global_prompt,
+                negative_prompt=negative_prompt,
+                denoise_strength=strength,
+                steps=int(steps),
+                cfg_scale=cfg,
+                controlnet_enabled=controlnet_enabled,
+                conditioning_scale=cond_scale,
+                ip_adapter_enabled=ip_enabled,
+                ip_adapter_scale=ip_scale,
+                seam_fix_enabled=seam_enabled,
+                seam_fix_strength=seam_strength,
+                seam_fix_feather=int(seam_feather),
+                lora_selections=lora_selections,
+            )
+            save_upscale_settings(settings)
+            return None  # No UI update needed
+
+        # Wire up change events for all settings components
+        settings_inputs = [
+            tile_size_num, overlap_num, gen_res_dd,
+            checkpoint_dropdown, global_prompt, negative_prompt,
+            strength_sl, steps_sl, cfg_sl,
+            controlnet_cb, cond_scale_sl,
+            ip_adapter_cb, ip_scale_sl,
+            seam_fix_cb, seam_fix_strength_sl, seam_fix_feather_sl,
+            lora_selections_state,
+        ]
+
+        for component in settings_inputs:
+            component.change(
+                fn=on_settings_change,
+                inputs=settings_inputs,
+                outputs=[],
+            )
 
         # ----------------------------------------------------------------
         # Upscale All Tiles
@@ -2200,6 +2379,31 @@ def _build_upscale_tab() -> None:
             inputs=[result_image],
             outputs=[image_input],
         )
+
+    # Return all components needed for page load handler and settings persistence
+    return (
+        upscale_tab,
+        lora_controls_html,
+        available_loras_state,
+        lora_selections_state,
+        checkpoint_dropdown,
+        available_checkpoints_state,
+        tile_size_num,
+        overlap_num,
+        gen_res_dd,
+        global_prompt,
+        negative_prompt,
+        strength_sl,
+        steps_sl,
+        cfg_sl,
+        controlnet_cb,
+        cond_scale_sl,
+        ip_adapter_cb,
+        ip_scale_sl,
+        seam_fix_cb,
+        seam_fix_strength_sl,
+        seam_fix_feather_sl,
+    )
 
 
 # ---------------------------------------------------------------------------
